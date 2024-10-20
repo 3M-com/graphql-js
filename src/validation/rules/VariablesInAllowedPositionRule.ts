@@ -7,8 +7,15 @@ import type { ValueNode, VariableDefinitionNode } from '../../language/ast.js';
 import { Kind } from '../../language/kinds.js';
 import type { ASTVisitor } from '../../language/visitor.js';
 
-import type { GraphQLType } from '../../type/definition.js';
-import { isNonNullType } from '../../type/definition.js';
+import type {
+  GraphQLDefaultValueUsage,
+  GraphQLType,
+} from '../../type/definition.js';
+import {
+  isInputObjectType,
+  isNonNullType,
+  isNullableType,
+} from '../../type/definition.js';
 import type { GraphQLSchema } from '../../type/schema.js';
 
 import { isTypeSubTypeOf } from '../../utilities/typeComparators.js';
@@ -36,9 +43,19 @@ export function VariablesInAllowedPositionRule(
       leave(operation) {
         const usages = context.getRecursiveVariableUsages(operation);
 
-        for (const { node, type, defaultValue } of usages) {
+        for (const {
+          node,
+          type,
+          parentType,
+          defaultValue,
+          fragmentVariableDefinition,
+        } of usages) {
           const varName = node.name.value;
-          const varDef = varDefMap.get(varName);
+
+          let varDef = fragmentVariableDefinition;
+          if (!varDef) {
+            varDef = varDefMap.get(varName);
+          }
           if (varDef && type) {
             // A var type is allowed if it is the same or more strict (e.g. is
             // a subtype of) than the expected type. It can be more strict if
@@ -66,6 +83,21 @@ export function VariablesInAllowedPositionRule(
                 ),
               );
             }
+
+            if (
+              isInputObjectType(parentType) &&
+              parentType.isOneOf &&
+              isNullableType(varType)
+            ) {
+              const varTypeStr = inspect(varType);
+              const parentTypeStr = inspect(parentType);
+              context.reportError(
+                new GraphQLError(
+                  `Variable "$${varName}" is of type "${varTypeStr}" but must be non-nullable to be used for OneOf Input Object "${parentTypeStr}".`,
+                  { nodes: [varDef, node] },
+                ),
+              );
+            }
           }
         }
       },
@@ -78,15 +110,18 @@ export function VariablesInAllowedPositionRule(
 
 /**
  * Returns true if the variable is allowed in the location it was found,
- * which includes considering if default values exist for either the variable
+ * including considering if default values exist for either the variable
  * or the location at which it is located.
+ *
+ * OneOf Input Object Type fields are considered separately above to
+ * provide a more descriptive error message.
  */
 function allowedVariableUsage(
   schema: GraphQLSchema,
   varType: GraphQLType,
   varDefaultValue: Maybe<ValueNode>,
   locationType: GraphQLType,
-  locationDefaultValue: Maybe<unknown>,
+  locationDefaultValue: GraphQLDefaultValueUsage | undefined,
 ): boolean {
   if (isNonNullType(locationType) && !isNonNullType(varType)) {
     const hasNonNullVariableDefaultValue =

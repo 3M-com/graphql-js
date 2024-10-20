@@ -1,7 +1,7 @@
 /**
  * The set of allowed kind values for AST nodes.
  */
-export enum Kind {
+enum Kind {
   /** Name */
   NAME = 'Name',
 
@@ -12,11 +12,7 @@ export enum Kind {
   SELECTION_SET = 'SelectionSet',
   FIELD = 'Field',
   ARGUMENT = 'Argument',
-
-  /** Nullability Modifiers */
-  LIST_NULLABILITY_OPERATOR = 'ListNullabilityOperator',
-  NON_NULL_ASSERTION = 'NonNullAssertion',
-  ERROR_BOUNDARY = 'ErrorBoundary',
+  FRAGMENT_ARGUMENT = 'FragmentArgument',
 
   /** Fragments */
   FRAGMENT_SPREAD = 'FragmentSpread',
@@ -72,3 +68,5 @@ export enum Kind {
   ENUM_TYPE_EXTENSION = 'EnumTypeExtension',
   INPUT_OBJECT_TYPE_EXTENSION = 'InputObjectTypeExtension',
 }
+
+export { Kind };

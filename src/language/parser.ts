@@ -20,10 +20,10 @@ import type {
   EnumTypeExtensionNode,
   EnumValueDefinitionNode,
   EnumValueNode,
-  ErrorBoundaryNode,
   FieldDefinitionNode,
   FieldNode,
   FloatValueNode,
+  FragmentArgumentNode,
   FragmentDefinitionNode,
   FragmentSpreadNode,
   InlineFragmentNode,
@@ -33,14 +33,11 @@ import type {
   InterfaceTypeDefinitionNode,
   InterfaceTypeExtensionNode,
   IntValueNode,
-  ListNullabilityOperatorNode,
   ListTypeNode,
   ListValueNode,
   NamedTypeNode,
   NameNode,
-  NonNullAssertionNode,
   NonNullTypeNode,
-  NullabilityAssertionNode,
   NullValueNode,
   ObjectFieldNode,
   ObjectTypeDefinitionNode,
@@ -92,44 +89,25 @@ export interface ParseOptions {
   maxTokens?: number | undefined;
 
   /**
-   * @deprecated will be removed in the v17.0.0
+   * EXPERIMENTAL:
    *
-   * If enabled, the parser will understand and parse variable definitions
-   * contained in a fragment definition. They'll be represented in the
-   * `variableDefinitions` field of the FragmentDefinitionNode.
+   * If enabled, the parser will understand and parse fragment variable definitions
+   * and arguments on fragment spreads. Fragment variable definitions will be represented
+   * in the `variableDefinitions` field of the FragmentDefinitionNode.
+   * Fragment spread arguments will be represented in the `arguments` field of FragmentSpreadNode.
    *
-   * The syntax is identical to normal, query-defined variables. For example:
+   * For example:
    *
    * ```graphql
+   * {
+   *   t { ...A(var: true) }
+   * }
    * fragment A($var: Boolean = false) on T {
-   *   ...
+   *   ...B(x: $var)
    * }
    * ```
    */
-  allowLegacyFragmentVariables?: boolean | undefined;
-
-  /**
-   * EXPERIMENTAL:
-   *
-   * If enabled, the parser will understand and parse Client Controlled Nullability
-   * Designators contained in Fields. They'll be represented in the
-   * `nullabilityAssertion` field of the FieldNode.
-   *
-   * The syntax looks like the following:
-   *
-   * ```graphql
-   *   {
-   *     nullableField!
-   *     nonNullableField?
-   *     nonNullableSelectionSet? {
-   *       childField!
-   *     }
-   *   }
-   * ```
-   * Note: this feature is experimental and may change or be removed in the
-   * future.
-   */
-  experimentalClientControlledNullability?: boolean | undefined;
+  experimentalFragmentArguments?: boolean | undefined;
 }
 
 /**
@@ -151,8 +129,6 @@ export function parse(
  *
  * This is useful within tools that operate upon GraphQL Values directly and
  * in isolation of complete GraphQL documents.
- *
- * Consider providing the results to the utility function: valueFromAST().
  */
 export function parseValue(
   source: string | Source,
@@ -343,8 +319,8 @@ export class Parser {
         kind: Kind.OPERATION_DEFINITION,
         operation: OperationTypeNode.QUERY,
         name: undefined,
-        variableDefinitions: [],
-        directives: [],
+        variableDefinitions: undefined,
+        directives: undefined,
         selectionSet: this.parseSelectionSet(),
       });
     }
@@ -383,7 +359,7 @@ export class Parser {
   /**
    * VariableDefinitions : ( VariableDefinition+ )
    */
-  parseVariableDefinitions(): Array<VariableDefinitionNode> {
+  parseVariableDefinitions(): Array<VariableDefinitionNode> | undefined {
     return this.optionalMany(
       TokenKind.PAREN_L,
       this.parseVariableDefinition,
@@ -469,9 +445,6 @@ export class Parser {
       alias,
       name,
       arguments: this.parseArguments(false),
-      // Experimental support for Client Controlled Nullability changes
-      // the grammar of Field:
-      nullabilityAssertion: this.parseNullabilityAssertion(),
       directives: this.parseDirectives(false),
       selectionSet: this.peek(TokenKind.BRACE_L)
         ? this.parseSelectionSet()
@@ -479,48 +452,19 @@ export class Parser {
     });
   }
 
-  // TODO: add grammar comment after it finalizes
-  parseNullabilityAssertion(): NullabilityAssertionNode | undefined {
-    // Note: Client Controlled Nullability is experimental and may be changed or
-    // removed in the future.
-    if (this._options.experimentalClientControlledNullability !== true) {
-      return undefined;
-    }
-
-    const start = this._lexer.token;
-    let nullabilityAssertion;
-
-    if (this.expectOptionalToken(TokenKind.BRACKET_L)) {
-      const innerModifier = this.parseNullabilityAssertion();
-      this.expectToken(TokenKind.BRACKET_R);
-      nullabilityAssertion = this.node<ListNullabilityOperatorNode>(start, {
-        kind: Kind.LIST_NULLABILITY_OPERATOR,
-        nullabilityAssertion: innerModifier,
-      });
-    }
-
-    if (this.expectOptionalToken(TokenKind.BANG)) {
-      nullabilityAssertion = this.node<NonNullAssertionNode>(start, {
-        kind: Kind.NON_NULL_ASSERTION,
-        nullabilityAssertion,
-      });
-    } else if (this.expectOptionalToken(TokenKind.QUESTION_MARK)) {
-      nullabilityAssertion = this.node<ErrorBoundaryNode>(start, {
-        kind: Kind.ERROR_BOUNDARY,
-        nullabilityAssertion,
-      });
-    }
-
-    return nullabilityAssertion;
-  }
-
   /**
    * Arguments[Const] : ( Argument[?Const]+ )
    */
-  parseArguments(isConst: true): Array<ConstArgumentNode>;
-  parseArguments(isConst: boolean): Array<ArgumentNode>;
-  parseArguments(isConst: boolean): Array<ArgumentNode> {
+  parseArguments(isConst: true): Array<ConstArgumentNode> | undefined;
+  parseArguments(isConst: boolean): Array<ArgumentNode> | undefined;
+  parseArguments(isConst: boolean): Array<ArgumentNode> | undefined {
     const item = isConst ? this.parseConstArgument : this.parseArgument;
+    return this.optionalMany(TokenKind.PAREN_L, item, TokenKind.PAREN_R);
+  }
+
+  /* experimental */
+  parseFragmentArguments(): Array<FragmentArgumentNode> | undefined {
+    const item = this.parseFragmentArgument;
     return this.optionalMany(TokenKind.PAREN_L, item, TokenKind.PAREN_R);
   }
 
@@ -545,12 +489,25 @@ export class Parser {
     return this.parseArgument(true);
   }
 
+  /* experimental */
+  parseFragmentArgument(): FragmentArgumentNode {
+    const start = this._lexer.token;
+    const name = this.parseName();
+
+    this.expectToken(TokenKind.COLON);
+    return this.node<FragmentArgumentNode>(start, {
+      kind: Kind.FRAGMENT_ARGUMENT,
+      name,
+      value: this.parseValueLiteral(false),
+    });
+  }
+
   // Implements the parsing rules in the Fragments section.
 
   /**
    * Corresponds to both FragmentSpread and InlineFragment in the spec.
    *
-   * FragmentSpread : ... FragmentName Directives?
+   * FragmentSpread : ... FragmentName Arguments? Directives?
    *
    * InlineFragment : ... TypeCondition? Directives? SelectionSet
    */
@@ -560,9 +517,21 @@ export class Parser {
 
     const hasTypeCondition = this.expectOptionalKeyword('on');
     if (!hasTypeCondition && this.peek(TokenKind.NAME)) {
+      const name = this.parseFragmentName();
+      if (
+        this.peek(TokenKind.PAREN_L) &&
+        this._options.experimentalFragmentArguments
+      ) {
+        return this.node<FragmentSpreadNode>(start, {
+          kind: Kind.FRAGMENT_SPREAD,
+          name,
+          arguments: this.parseFragmentArguments(),
+          directives: this.parseDirectives(false),
+        });
+      }
       return this.node<FragmentSpreadNode>(start, {
         kind: Kind.FRAGMENT_SPREAD,
-        name: this.parseFragmentName(),
+        name,
         directives: this.parseDirectives(false),
       });
     }
@@ -576,17 +545,14 @@ export class Parser {
 
   /**
    * FragmentDefinition :
-   *   - fragment FragmentName on TypeCondition Directives? SelectionSet
+   *   - fragment FragmentName VariableDefinitions? on TypeCondition Directives? SelectionSet
    *
    * TypeCondition : NamedType
    */
   parseFragmentDefinition(): FragmentDefinitionNode {
     const start = this._lexer.token;
     this.expectKeyword('fragment');
-    // Legacy support for defining variables within fragments changes
-    // the grammar of FragmentDefinition:
-    //   - fragment FragmentName VariableDefinitions? on TypeCondition Directives? SelectionSet
-    if (this._options.allowLegacyFragmentVariables === true) {
+    if (this._options.experimentalFragmentArguments === true) {
       return this.node<FragmentDefinitionNode>(start, {
         kind: Kind.FRAGMENT_DEFINITION,
         name: this.parseFragmentName(),
@@ -767,17 +733,20 @@ export class Parser {
   /**
    * Directives[Const] : Directive[?Const]+
    */
-  parseDirectives(isConst: true): Array<ConstDirectiveNode>;
-  parseDirectives(isConst: boolean): Array<DirectiveNode>;
-  parseDirectives(isConst: boolean): Array<DirectiveNode> {
+  parseDirectives(isConst: true): Array<ConstDirectiveNode> | undefined;
+  parseDirectives(isConst: boolean): Array<DirectiveNode> | undefined;
+  parseDirectives(isConst: boolean): Array<DirectiveNode> | undefined {
     const directives = [];
     while (this.peek(TokenKind.AT)) {
       directives.push(this.parseDirective(isConst));
     }
-    return directives;
+    if (directives.length) {
+      return directives;
+    }
+    return undefined;
   }
 
-  parseConstDirectives(): Array<ConstDirectiveNode> {
+  parseConstDirectives(): Array<ConstDirectiveNode> | undefined {
     return this.parseDirectives(true);
   }
 
@@ -938,10 +907,10 @@ export class Parser {
    *   - implements `&`? NamedType
    *   - ImplementsInterfaces & NamedType
    */
-  parseImplementsInterfaces(): Array<NamedTypeNode> {
+  parseImplementsInterfaces(): Array<NamedTypeNode> | undefined {
     return this.expectOptionalKeyword('implements')
       ? this.delimitedMany(TokenKind.AMP, this.parseNamedType)
-      : [];
+      : undefined;
   }
 
   /**
@@ -949,7 +918,7 @@ export class Parser {
    * FieldsDefinition : { FieldDefinition+ }
    * ```
    */
-  parseFieldsDefinition(): Array<FieldDefinitionNode> {
+  parseFieldsDefinition(): Array<FieldDefinitionNode> | undefined {
     return this.optionalMany(
       TokenKind.BRACE_L,
       this.parseFieldDefinition,
@@ -982,7 +951,7 @@ export class Parser {
   /**
    * ArgumentsDefinition : ( InputValueDefinition+ )
    */
-  parseArgumentDefs(): Array<InputValueDefinitionNode> {
+  parseArgumentDefs(): Array<InputValueDefinitionNode> | undefined {
     return this.optionalMany(
       TokenKind.PAREN_L,
       this.parseInputValueDef,
@@ -1062,10 +1031,10 @@ export class Parser {
    *   - = `|`? NamedType
    *   - UnionMemberTypes | NamedType
    */
-  parseUnionMemberTypes(): Array<NamedTypeNode> {
+  parseUnionMemberTypes(): Array<NamedTypeNode> | undefined {
     return this.expectOptionalToken(TokenKind.EQUALS)
       ? this.delimitedMany(TokenKind.PIPE, this.parseNamedType)
-      : [];
+      : undefined;
   }
 
   /**
@@ -1093,7 +1062,7 @@ export class Parser {
    * EnumValuesDefinition : { EnumValueDefinition+ }
    * ```
    */
-  parseEnumValuesDefinition(): Array<EnumValueDefinitionNode> {
+  parseEnumValuesDefinition(): Array<EnumValueDefinitionNode> | undefined {
     return this.optionalMany(
       TokenKind.BRACE_L,
       this.parseEnumValueDefinition,
@@ -1162,7 +1131,7 @@ export class Parser {
    * InputFieldsDefinition : { InputValueDefinition+ }
    * ```
    */
-  parseInputFieldsDefinition(): Array<InputValueDefinitionNode> {
+  parseInputFieldsDefinition(): Array<InputValueDefinitionNode> | undefined {
     return this.optionalMany(
       TokenKind.BRACE_L,
       this.parseInputValueDef,
@@ -1225,7 +1194,7 @@ export class Parser {
       this.parseOperationTypeDefinition,
       TokenKind.BRACE_R,
     );
-    if (directives.length === 0 && operationTypes.length === 0) {
+    if (directives === undefined && operationTypes === undefined) {
       throw this.unexpected();
     }
     return this.node<SchemaExtensionNode>(start, {
@@ -1245,7 +1214,7 @@ export class Parser {
     this.expectKeyword('scalar');
     const name = this.parseName();
     const directives = this.parseConstDirectives();
-    if (directives.length === 0) {
+    if (directives === undefined) {
       throw this.unexpected();
     }
     return this.node<ScalarTypeExtensionNode>(start, {
@@ -1270,9 +1239,9 @@ export class Parser {
     const directives = this.parseConstDirectives();
     const fields = this.parseFieldsDefinition();
     if (
-      interfaces.length === 0 &&
-      directives.length === 0 &&
-      fields.length === 0
+      interfaces === undefined &&
+      directives === undefined &&
+      fields === undefined
     ) {
       throw this.unexpected();
     }
@@ -1300,9 +1269,9 @@ export class Parser {
     const directives = this.parseConstDirectives();
     const fields = this.parseFieldsDefinition();
     if (
-      interfaces.length === 0 &&
-      directives.length === 0 &&
-      fields.length === 0
+      interfaces === undefined &&
+      directives === undefined &&
+      fields === undefined
     ) {
       throw this.unexpected();
     }
@@ -1327,7 +1296,7 @@ export class Parser {
     const name = this.parseName();
     const directives = this.parseConstDirectives();
     const types = this.parseUnionMemberTypes();
-    if (directives.length === 0 && types.length === 0) {
+    if (directives === undefined && types === undefined) {
       throw this.unexpected();
     }
     return this.node<UnionTypeExtensionNode>(start, {
@@ -1350,7 +1319,7 @@ export class Parser {
     const name = this.parseName();
     const directives = this.parseConstDirectives();
     const values = this.parseEnumValuesDefinition();
-    if (directives.length === 0 && values.length === 0) {
+    if (directives === undefined && values === undefined) {
       throw this.unexpected();
     }
     return this.node<EnumTypeExtensionNode>(start, {
@@ -1373,7 +1342,7 @@ export class Parser {
     const name = this.parseName();
     const directives = this.parseConstDirectives();
     const fields = this.parseInputFieldsDefinition();
-    if (directives.length === 0 && fields.length === 0) {
+    if (directives === undefined && fields === undefined) {
       throw this.unexpected();
     }
     return this.node<InputObjectTypeExtensionNode>(start, {
@@ -1584,7 +1553,7 @@ export class Parser {
     openKind: TokenKind,
     parseFn: () => T,
     closeKind: TokenKind,
-  ): Array<T> {
+  ): Array<T> | undefined {
     if (this.expectOptionalToken(openKind)) {
       const nodes = [];
       do {
@@ -1592,7 +1561,7 @@ export class Parser {
       } while (!this.expectOptionalToken(closeKind));
       return nodes;
     }
-    return [];
+    return undefined;
   }
 
   /**

@@ -11,11 +11,12 @@ import type { ObjMap } from '../jsutils/ObjMap.js';
 import type { Path } from '../jsutils/Path.js';
 import type { PromiseOrValue } from '../jsutils/PromiseOrValue.js';
 import { suggestionList } from '../jsutils/suggestionList.js';
-import { toObjMap } from '../jsutils/toObjMap.js';
+import { toObjMapWithSymbols } from '../jsutils/toObjMap.js';
 
 import { GraphQLError } from '../error/GraphQLError.js';
 
 import type {
+  ConstValueNode,
   EnumTypeDefinitionNode,
   EnumTypeExtensionNode,
   EnumValueDefinitionNode,
@@ -38,6 +39,9 @@ import type {
 } from '../language/ast.js';
 import { Kind } from '../language/kinds.js';
 import { print } from '../language/printer.js';
+
+import type { GraphQLVariableSignature } from '../execution/getVariableSignature.js';
+import type { VariableValues } from '../execution/values.js';
 
 import { valueFromASTUntyped } from '../utilities/valueFromASTUntyped.js';
 
@@ -508,7 +512,7 @@ export function resolveObjMapThunk<T>(thunk: ThunkObjMap<T>): ObjMap<T> {
  * an object which can contain all the values you need.
  */
 export interface GraphQLScalarTypeExtensions {
-  [attributeName: string]: unknown;
+  [attributeName: string | symbol]: unknown;
 }
 
 /**
@@ -518,56 +522,113 @@ export interface GraphQLScalarTypeExtensions {
  * Scalars (or Enums) and are defined with a name and a series of functions
  * used to parse input from ast or variables and to ensure validity.
  *
- * If a type's serialize function returns `null` or does not return a value
- * (i.e. it returns `undefined`) then an error will be raised and a `null`
- * value will be returned in the response. It is always better to validate
+ * If a type's coerceOutputValue function returns `null` or does not return a
+ * value (i.e. it returns `undefined`) then an error will be raised and a
+ * `null` value will be returned in the response. It is always better to
+ * validate.
  *
  * Example:
  *
  * ```ts
+ * function ensureOdd(value) {
+ *   if (!Number.isFinite(value)) {
+ *     throw new Error(
+ *       `Scalar "Odd" cannot represent "${value}" since it is not a finite number.`,
+ *     );
+ *   }
+ *
+ *   if (value % 2 === 0) {
+ *     throw new Error(`Scalar "Odd" cannot represent "${value}" since it is even.`);
+ *   }
+ * }
+ *
  * const OddType = new GraphQLScalarType({
  *   name: 'Odd',
- *   serialize(value) {
- *     if (!Number.isFinite(value)) {
- *       throw new Error(
- *         `Scalar "Odd" cannot represent "${value}" since it is not a finite number.`,
- *       );
- *     }
- *
- *     if (value % 2 === 0) {
- *       throw new Error(`Scalar "Odd" cannot represent "${value}" since it is even.`);
- *     }
- *     return value;
+ *   coerceOutputValue(value) {
+ *     return ensureOdd(value);
+ *   },
+ *   coerceInputValue(value) {
+ *     return ensureOdd(value);
+ *   }
+ *   valueToLiteral(value) {
+ *    return parse(`${ensureOdd(value)`);
  *   }
  * });
  * ```
+ *
+ * Custom scalars behavior is defined via the following functions:
+ *
+ *  - coerceOutputValue(value): Implements "Result Coercion". Given an internal value,
+ *    produces an external value valid for this type. Returns undefined or
+ *    throws an error to indicate invalid values.
+ *
+ *  - coerceInputValue(value): Implements "Input Coercion" for values. Given an
+ *    external value (for example, variable values), produces an internal value
+ *    valid for this type. Returns undefined or throws an error to indicate
+ *    invalid values.
+ *
+ *  - coerceInputLiteral(ast): Implements "Input Coercion" for constant literals.
+ *    Given an GraphQL literal (AST) (for example, an argument value), produces
+ *    an internal value valid for this type. Returns undefined or throws an
+ *    error to indicate invalid values.
+ *
+ *  - valueToLiteral(value): Converts an external value to a GraphQL
+ *    literal (AST). Returns undefined or throws an error to indicate
+ *    invalid values.
+ *
+ *  Deprecated, to be removed in v18:
+ *
+ *  - serialize(value): Implements "Result Coercion". Renamed to
+ *    `coerceOutputValue()`.
+ *
+ *  - parseValue(value): Implements "Input Coercion" for values. Renamed to
+ *    `coerceInputValue()`.
+ *
+ *  - parseLiteral(ast): Implements "Input Coercion" for literals including
+ *    non-specified replacement of variables embedded within complex scalars.
+ *    Replaced by the combination of the `replaceVariables()` utility and the
+ *    `coerceInputLiteral()` method.
+ *
  */
 export class GraphQLScalarType<TInternal = unknown, TExternal = TInternal> {
   name: string;
   description: Maybe<string>;
   specifiedByURL: Maybe<string>;
+  /** @deprecated use `coerceOutputValue()` instead, `serialize()` will be removed in v18 */
   serialize: GraphQLScalarSerializer<TExternal>;
+  /** @deprecated use `coerceInputValue()` instead, `parseValue()` will be removed in v18 */
   parseValue: GraphQLScalarValueParser<TInternal>;
+  /** @deprecated use `replaceVariables()` and `coerceInputLiteral()` instead, `parseLiteral()` will be removed in v18 */
   parseLiteral: GraphQLScalarLiteralParser<TInternal>;
+  coerceOutputValue: GraphQLScalarOutputValueCoercer<TExternal>;
+  coerceInputValue: GraphQLScalarInputValueCoercer<TInternal>;
+  coerceInputLiteral: GraphQLScalarInputLiteralCoercer<TInternal> | undefined;
+  valueToLiteral: GraphQLScalarValueToLiteral | undefined;
   extensions: Readonly<GraphQLScalarTypeExtensions>;
   astNode: Maybe<ScalarTypeDefinitionNode>;
   extensionASTNodes: ReadonlyArray<ScalarTypeExtensionNode>;
 
   constructor(config: Readonly<GraphQLScalarTypeConfig<TInternal, TExternal>>) {
-    const parseValue =
-      config.parseValue ??
-      (identityFunc as GraphQLScalarValueParser<TInternal>);
-
     this.name = assertName(config.name);
     this.description = config.description;
     this.specifiedByURL = config.specifiedByURL;
     this.serialize =
-      config.serialize ?? (identityFunc as GraphQLScalarSerializer<TExternal>);
-    this.parseValue = parseValue;
+      config.serialize ??
+      config.coerceOutputValue ??
+      (identityFunc as GraphQLScalarSerializer<TExternal>);
+    this.parseValue =
+      config.parseValue ??
+      config.coerceInputValue ??
+      (identityFunc as GraphQLScalarValueParser<TInternal>);
     this.parseLiteral =
       config.parseLiteral ??
-      ((node, variables) => parseValue(valueFromASTUntyped(node, variables)));
-    this.extensions = toObjMap(config.extensions);
+      ((node, variables) =>
+        this.coerceInputValue(valueFromASTUntyped(node, variables)));
+    this.coerceOutputValue = config.coerceOutputValue ?? this.serialize;
+    this.coerceInputValue = config.coerceInputValue ?? this.parseValue;
+    this.coerceInputLiteral = config.coerceInputLiteral;
+    this.valueToLiteral = config.valueToLiteral;
+    this.extensions = toObjMapWithSymbols(config.extensions);
     this.astNode = config.astNode;
     this.extensionASTNodes = config.extensionASTNodes ?? [];
 
@@ -576,6 +637,14 @@ export class GraphQLScalarType<TInternal = unknown, TExternal = TInternal> {
         typeof config.parseValue === 'function' &&
           typeof config.parseLiteral === 'function',
         `${this.name} must provide both "parseValue" and "parseLiteral" functions.`,
+      );
+    }
+
+    if (config.coerceInputLiteral) {
+      devAssert(
+        typeof config.coerceInputValue === 'function' &&
+          typeof config.coerceInputLiteral === 'function',
+        `${this.name} must provide both "coerceInputValue" and "coerceInputLiteral" functions.`,
       );
     }
   }
@@ -592,6 +661,10 @@ export class GraphQLScalarType<TInternal = unknown, TExternal = TInternal> {
       serialize: this.serialize,
       parseValue: this.parseValue,
       parseLiteral: this.parseLiteral,
+      coerceOutputValue: this.coerceOutputValue,
+      coerceInputValue: this.coerceInputValue,
+      coerceInputLiteral: this.coerceInputLiteral,
+      valueToLiteral: this.valueToLiteral,
       extensions: this.extensions,
       astNode: this.astNode,
       extensionASTNodes: this.extensionASTNodes,
@@ -607,29 +680,59 @@ export class GraphQLScalarType<TInternal = unknown, TExternal = TInternal> {
   }
 }
 
+/* @deprecated in favor of GraphQLScalarOutputValueCoercer, will be removed in v18 */
 export type GraphQLScalarSerializer<TExternal> = (
   outputValue: unknown,
 ) => TExternal;
 
+export type GraphQLScalarOutputValueCoercer<TExternal> = (
+  outputValue: unknown,
+) => TExternal;
+
+/* @deprecated in favor of GraphQLScalarInputValueCoercer, will be removed in v18 */
 export type GraphQLScalarValueParser<TInternal> = (
   inputValue: unknown,
 ) => TInternal;
 
+export type GraphQLScalarInputValueCoercer<TInternal> = (
+  inputValue: unknown,
+) => TInternal;
+
+/* @deprecated in favor of GraphQLScalarInputLiteralCoercer, will be removed in v18 */
 export type GraphQLScalarLiteralParser<TInternal> = (
   valueNode: ValueNode,
-  variables?: Maybe<ObjMap<unknown>>,
-) => TInternal;
+  variables: Maybe<ObjMap<unknown>>,
+) => Maybe<TInternal>;
+
+export type GraphQLScalarInputLiteralCoercer<TInternal> = (
+  valueNode: ConstValueNode,
+) => Maybe<TInternal>;
+
+export type GraphQLScalarValueToLiteral = (
+  inputValue: unknown,
+) => ConstValueNode | undefined;
 
 export interface GraphQLScalarTypeConfig<TInternal, TExternal> {
   name: string;
   description?: Maybe<string>;
   specifiedByURL?: Maybe<string>;
   /** Serializes an internal value to include in a response. */
+  /** @deprecated use `coerceOutputValue()` instead, `serialize()` will be removed in v18 */
   serialize?: GraphQLScalarSerializer<TExternal> | undefined;
   /** Parses an externally provided value to use as an input. */
+  /** @deprecated use `coerceInputValue()` instead, `parseValue()` will be removed in v18 */
   parseValue?: GraphQLScalarValueParser<TInternal> | undefined;
   /** Parses an externally provided literal value to use as an input. */
+  /** @deprecated use `replaceVariables()` and `coerceInputLiteral()` instead, `parseLiteral()` will be removed in v18 */
   parseLiteral?: GraphQLScalarLiteralParser<TInternal> | undefined;
+  /** Coerces an externally provided value to use as an input. */
+  coerceOutputValue?: GraphQLScalarOutputValueCoercer<TExternal> | undefined;
+  /** Coerces an internal value to include in a response. */
+  coerceInputValue?: GraphQLScalarInputValueCoercer<TInternal> | undefined;
+  /** Coerces an externally provided const literal value to use as an input. */
+  coerceInputLiteral?: GraphQLScalarInputLiteralCoercer<TInternal> | undefined;
+  /** Translates an externally provided value to a literal (AST). */
+  valueToLiteral?: GraphQLScalarValueToLiteral | undefined;
   extensions?: Maybe<Readonly<GraphQLScalarTypeExtensions>>;
   astNode?: Maybe<ScalarTypeDefinitionNode>;
   extensionASTNodes?: Maybe<ReadonlyArray<ScalarTypeExtensionNode>>;
@@ -640,6 +743,9 @@ interface GraphQLScalarTypeNormalizedConfig<TInternal, TExternal>
   serialize: GraphQLScalarSerializer<TExternal>;
   parseValue: GraphQLScalarValueParser<TInternal>;
   parseLiteral: GraphQLScalarLiteralParser<TInternal>;
+  coerceOutputValue: GraphQLScalarOutputValueCoercer<TExternal>;
+  coerceInputValue: GraphQLScalarInputValueCoercer<TInternal>;
+  coerceInputLiteral: GraphQLScalarInputLiteralCoercer<TInternal> | undefined;
   extensions: Readonly<GraphQLScalarTypeExtensions>;
   extensionASTNodes: ReadonlyArray<ScalarTypeExtensionNode>;
 }
@@ -657,7 +763,7 @@ interface GraphQLScalarTypeNormalizedConfig<TInternal, TExternal>
  * you may find them useful.
  */
 export interface GraphQLObjectTypeExtensions<_TSource = any, _TContext = any> {
-  [attributeName: string]: unknown;
+  [attributeName: string | symbol]: unknown;
 }
 
 /**
@@ -715,13 +821,13 @@ export class GraphQLObjectType<TSource = any, TContext = any> {
     this.name = assertName(config.name);
     this.description = config.description;
     this.isTypeOf = config.isTypeOf;
-    this.extensions = toObjMap(config.extensions);
+    this.extensions = toObjMapWithSymbols(config.extensions);
     this.astNode = config.astNode;
     this.extensionASTNodes = config.extensionASTNodes ?? [];
-
-    // prettier-ignore
-    // FIXME: blocked by https://github.com/prettier/prettier/issues/14625
-    this._fields = (defineFieldMap<TSource, TContext>).bind(undefined, config.fields);
+    this._fields = (defineFieldMap<TSource, TContext>).bind(
+      undefined,
+      config.fields,
+    );
     this._interfaces = defineInterfaces.bind(undefined, config.interfaces);
   }
 
@@ -786,7 +892,7 @@ function defineFieldMap<TSource, TContext>(
       resolve: fieldConfig.resolve,
       subscribe: fieldConfig.subscribe,
       deprecationReason: fieldConfig.deprecationReason,
-      extensions: toObjMap(fieldConfig.extensions),
+      extensions: toObjMapWithSymbols(fieldConfig.extensions),
       astNode: fieldConfig.astNode,
     };
   });
@@ -799,9 +905,9 @@ export function defineArguments(
     name: assertName(argName),
     description: argConfig.description,
     type: argConfig.type,
-    defaultValue: argConfig.defaultValue,
+    defaultValue: defineDefaultValue(argName, argConfig),
     deprecationReason: argConfig.deprecationReason,
-    extensions: toObjMap(argConfig.extensions),
+    extensions: toObjMapWithSymbols(argConfig.extensions),
     astNode: argConfig.astNode,
   }));
 }
@@ -833,7 +939,8 @@ export function argsToArgsConfig(
     (arg) => ({
       description: arg.description,
       type: arg.type,
-      defaultValue: arg.defaultValue,
+      defaultValue: arg.defaultValue?.value,
+      defaultValueLiteral: arg.defaultValue?.literal,
       deprecationReason: arg.deprecationReason,
       extensions: arg.extensions,
       astNode: arg.astNode,
@@ -895,7 +1002,7 @@ export interface GraphQLResolveInfo {
   readonly fragments: ObjMap<FragmentDefinitionNode>;
   readonly rootValue: unknown;
   readonly operation: OperationDefinitionNode;
-  readonly variableValues: { [variable: string]: unknown };
+  readonly variableValues: VariableValues;
 }
 
 /**
@@ -911,7 +1018,7 @@ export interface GraphQLResolveInfo {
  * you may find them useful.
  */
 export interface GraphQLFieldExtensions<_TSource, _TContext, _TArgs = any> {
-  [attributeName: string]: unknown;
+  [attributeName: string | symbol]: unknown;
 }
 
 export interface GraphQLFieldConfig<TSource, TContext, TArgs = any> {
@@ -939,13 +1046,14 @@ export type GraphQLFieldConfigArgumentMap = ObjMap<GraphQLArgumentConfig>;
  * an object which can contain all the values you need.
  */
 export interface GraphQLArgumentExtensions {
-  [attributeName: string]: unknown;
+  [attributeName: string | symbol]: unknown;
 }
 
 export interface GraphQLArgumentConfig {
   description?: Maybe<string>;
   type: GraphQLInputType;
   defaultValue?: unknown;
+  defaultValueLiteral?: ConstValueNode | undefined;
   deprecationReason?: Maybe<string>;
   extensions?: Maybe<Readonly<GraphQLArgumentExtensions>>;
   astNode?: Maybe<InputValueDefinitionNode>;
@@ -971,19 +1079,41 @@ export interface GraphQLArgument {
   name: string;
   description: Maybe<string>;
   type: GraphQLInputType;
-  defaultValue: unknown;
+  defaultValue: GraphQLDefaultValueUsage | undefined;
   deprecationReason: Maybe<string>;
   extensions: Readonly<GraphQLArgumentExtensions>;
   astNode: Maybe<InputValueDefinitionNode>;
 }
 
-export function isRequiredArgument(arg: GraphQLArgument): boolean {
+export function isRequiredArgument(
+  arg: GraphQLArgument | GraphQLVariableSignature,
+): boolean {
   return isNonNullType(arg.type) && arg.defaultValue === undefined;
 }
 
 export type GraphQLFieldMap<TSource, TContext> = ObjMap<
   GraphQLField<TSource, TContext>
 >;
+
+export type GraphQLDefaultValueUsage =
+  | { value: unknown; literal?: never }
+  | { literal: ConstValueNode; value?: never };
+
+export function defineDefaultValue(
+  argName: string,
+  config: GraphQLArgumentConfig | GraphQLInputFieldConfig,
+): GraphQLDefaultValueUsage | undefined {
+  if (config.defaultValue === undefined && !config.defaultValueLiteral) {
+    return;
+  }
+  devAssert(
+    !(config.defaultValue !== undefined && config.defaultValueLiteral),
+    `Argument "${argName}" has both a defaultValue and a defaultValueLiteral property, but only one must be provided.`,
+  );
+  return config.defaultValueLiteral
+    ? { literal: config.defaultValueLiteral }
+    : { value: config.defaultValue };
+}
 
 /**
  * Custom extensions
@@ -995,7 +1125,7 @@ export type GraphQLFieldMap<TSource, TContext> = ObjMap<
  * an object which can contain all the values you need.
  */
 export interface GraphQLInterfaceTypeExtensions {
-  [attributeName: string]: unknown;
+  [attributeName: string | symbol]: unknown;
 }
 
 /**
@@ -1032,13 +1162,13 @@ export class GraphQLInterfaceType<TSource = any, TContext = any> {
     this.name = assertName(config.name);
     this.description = config.description;
     this.resolveType = config.resolveType;
-    this.extensions = toObjMap(config.extensions);
+    this.extensions = toObjMapWithSymbols(config.extensions);
     this.astNode = config.astNode;
     this.extensionASTNodes = config.extensionASTNodes ?? [];
-
-    // prettier-ignore
-    // FIXME: blocked by https://github.com/prettier/prettier/issues/14625
-    this._fields = (defineFieldMap<TSource, TContext>).bind(undefined, config.fields);
+    this._fields = (defineFieldMap<TSource, TContext>).bind(
+      undefined,
+      config.fields,
+    );
     this._interfaces = defineInterfaces.bind(undefined, config.interfaces);
   }
 
@@ -1098,7 +1228,7 @@ export interface GraphQLInterfaceTypeConfig<TSource, TContext> {
   extensionASTNodes?: Maybe<ReadonlyArray<InterfaceTypeExtensionNode>>;
 }
 
-export interface GraphQLInterfaceTypeNormalizedConfig<TSource, TContext>
+interface GraphQLInterfaceTypeNormalizedConfig<TSource, TContext>
   extends GraphQLInterfaceTypeConfig<any, any> {
   interfaces: ReadonlyArray<GraphQLInterfaceType>;
   fields: GraphQLFieldConfigMap<TSource, TContext>;
@@ -1116,7 +1246,7 @@ export interface GraphQLInterfaceTypeNormalizedConfig<TSource, TContext>
  * an object which can contain all the values you need.
  */
 export interface GraphQLUnionTypeExtensions {
-  [attributeName: string]: unknown;
+  [attributeName: string | symbol]: unknown;
 }
 
 /**
@@ -1157,7 +1287,7 @@ export class GraphQLUnionType {
     this.name = assertName(config.name);
     this.description = config.description;
     this.resolveType = config.resolveType;
-    this.extensions = toObjMap(config.extensions);
+    this.extensions = toObjMapWithSymbols(config.extensions);
     this.astNode = config.astNode;
     this.extensionASTNodes = config.extensionASTNodes ?? [];
 
@@ -1234,7 +1364,7 @@ interface GraphQLUnionTypeNormalizedConfig
  * an object which can contain all the values you need.
  */
 export interface GraphQLEnumTypeExtensions {
-  [attributeName: string]: unknown;
+  [attributeName: string | symbol]: unknown;
 }
 
 function enumValuesFromConfig(values: GraphQLEnumValueConfigMap) {
@@ -1243,7 +1373,7 @@ function enumValuesFromConfig(values: GraphQLEnumValueConfigMap) {
     description: valueConfig.description,
     value: valueConfig.value !== undefined ? valueConfig.value : valueName,
     deprecationReason: valueConfig.deprecationReason,
-    extensions: toObjMap(valueConfig.extensions),
+    extensions: toObjMapWithSymbols(valueConfig.extensions),
     astNode: valueConfig.astNode,
   }));
 }
@@ -1251,7 +1381,7 @@ function enumValuesFromConfig(values: GraphQLEnumValueConfigMap) {
 /**
  * Enum Type Definition
  *
- * Some leaf values of requests and input values are Enums. GraphQL serializes
+ * Some leaf values of requests and input values are Enums. GraphQL coerces
  * Enum values as strings, however internally Enums can be represented by any
  * kind of type, often integers.
  *
@@ -1288,7 +1418,7 @@ export class GraphQLEnumType /* <T> */ {
   constructor(config: Readonly<GraphQLEnumTypeConfig /* <T> */>) {
     this.name = assertName(config.name);
     this.description = config.description;
-    this.extensions = toObjMap(config.extensions);
+    this.extensions = toObjMapWithSymbols(config.extensions);
     this.astNode = config.astNode;
     this.extensionASTNodes = config.extensionASTNodes ?? [];
 
@@ -1318,7 +1448,12 @@ export class GraphQLEnumType /* <T> */ {
     return this._nameLookup[name];
   }
 
+  /** @deprecated use `coerceOutputValue()` instead, `serialize()` will be removed in v18 */
   serialize(outputValue: unknown /* T */): Maybe<string> {
+    return this.coerceOutputValue(outputValue);
+  }
+
+  coerceOutputValue(outputValue: unknown /* T */): Maybe<string> {
     if (this._valueLookup === null) {
       this._valueLookup = new Map(
         this.getValues().map((enumValue) => [enumValue.value, enumValue]),
@@ -1333,12 +1468,23 @@ export class GraphQLEnumType /* <T> */ {
     return enumValue.name;
   }
 
-  parseValue(inputValue: unknown): Maybe<any> /* T */ {
+  /** @deprecated use `coerceInputValue()` instead, `parseValue()` will be removed in v18 */
+  parseValue(
+    inputValue: unknown,
+    hideSuggestions?: Maybe<boolean>,
+  ): Maybe<any> /* T */ {
+    return this.coerceInputValue(inputValue, hideSuggestions);
+  }
+
+  coerceInputValue(
+    inputValue: unknown,
+    hideSuggestions?: Maybe<boolean>,
+  ): Maybe<any> /* T */ {
     if (typeof inputValue !== 'string') {
       const valueStr = inspect(inputValue);
       throw new GraphQLError(
         `Enum "${this.name}" cannot represent non-string value: ${valueStr}.` +
-          didYouMeanEnumValue(this, valueStr),
+          (hideSuggestions ? '' : didYouMeanEnumValue(this, valueStr)),
       );
     }
 
@@ -1346,22 +1492,34 @@ export class GraphQLEnumType /* <T> */ {
     if (enumValue == null) {
       throw new GraphQLError(
         `Value "${inputValue}" does not exist in "${this.name}" enum.` +
-          didYouMeanEnumValue(this, inputValue),
+          (hideSuggestions ? '' : didYouMeanEnumValue(this, inputValue)),
       );
     }
     return enumValue.value;
   }
 
+  /** @deprecated use `coerceInputLiteral()` instead, `parseLiteral()` will be removed in v18 */
   parseLiteral(
     valueNode: ValueNode,
     _variables: Maybe<ObjMap<unknown>>,
+    hideSuggestions?: Maybe<boolean>,
   ): Maybe<any> /* T */ {
     // Note: variables will be resolved to a value before calling this function.
+    return this.coerceInputLiteral(
+      valueNode as ConstValueNode,
+      hideSuggestions,
+    );
+  }
+
+  coerceInputLiteral(
+    valueNode: ConstValueNode,
+    hideSuggestions?: Maybe<boolean>,
+  ): Maybe<any> /* T */ {
     if (valueNode.kind !== Kind.ENUM) {
       const valueStr = print(valueNode);
       throw new GraphQLError(
         `Enum "${this.name}" cannot represent non-enum value: ${valueStr}.` +
-          didYouMeanEnumValue(this, valueStr),
+          (hideSuggestions ? '' : didYouMeanEnumValue(this, valueStr)),
         { nodes: valueNode },
       );
     }
@@ -1371,11 +1529,17 @@ export class GraphQLEnumType /* <T> */ {
       const valueStr = print(valueNode);
       throw new GraphQLError(
         `Value "${valueStr}" does not exist in "${this.name}" enum.` +
-          didYouMeanEnumValue(this, valueStr),
+          (hideSuggestions ? '' : didYouMeanEnumValue(this, valueStr)),
         { nodes: valueNode },
       );
     }
     return enumValue.value;
+  }
+
+  valueToLiteral(value: unknown): ConstValueNode | undefined {
+    if (typeof value === 'string' && this.getValue(value)) {
+      return { kind: Kind.ENUM, value };
+    }
   }
 
   toConfig(): GraphQLEnumTypeNormalizedConfig {
@@ -1448,7 +1612,7 @@ export type GraphQLEnumValueConfigMap /* <T> */ =
  * an object which can contain all the values you need.
  */
 export interface GraphQLEnumValueExtensions {
-  [attributeName: string]: unknown;
+  [attributeName: string | symbol]: unknown;
 }
 
 export interface GraphQLEnumValueConfig {
@@ -1478,7 +1642,7 @@ export interface GraphQLEnumValue {
  * an object which can contain all the values you need.
  */
 export interface GraphQLInputObjectTypeExtensions {
-  [attributeName: string]: unknown;
+  [attributeName: string | symbol]: unknown;
 }
 
 /**
@@ -1515,7 +1679,7 @@ export class GraphQLInputObjectType {
   constructor(config: Readonly<GraphQLInputObjectTypeConfig>) {
     this.name = assertName(config.name);
     this.description = config.description;
-    this.extensions = toObjMap(config.extensions);
+    this.extensions = toObjMapWithSymbols(config.extensions);
     this.astNode = config.astNode;
     this.extensionASTNodes = config.extensionASTNodes ?? [];
     this.isOneOf = config.isOneOf ?? false;
@@ -1538,7 +1702,8 @@ export class GraphQLInputObjectType {
     const fields = mapValue(this.getFields(), (field) => ({
       description: field.description,
       type: field.type,
-      defaultValue: field.defaultValue,
+      defaultValue: field.defaultValue?.value,
+      defaultValueLiteral: field.defaultValue?.literal,
       deprecationReason: field.deprecationReason,
       extensions: field.extensions,
       astNode: field.astNode,
@@ -1572,9 +1737,9 @@ function defineInputFieldMap(
     name: assertName(fieldName),
     description: fieldConfig.description,
     type: fieldConfig.type,
-    defaultValue: fieldConfig.defaultValue,
+    defaultValue: defineDefaultValue(fieldName, fieldConfig),
     deprecationReason: fieldConfig.deprecationReason,
-    extensions: toObjMap(fieldConfig.extensions),
+    extensions: toObjMapWithSymbols(fieldConfig.extensions),
     astNode: fieldConfig.astNode,
   }));
 }
@@ -1606,13 +1771,14 @@ interface GraphQLInputObjectTypeNormalizedConfig
  * an object which can contain all the values you need.
  */
 export interface GraphQLInputFieldExtensions {
-  [attributeName: string]: unknown;
+  [attributeName: string | symbol]: unknown;
 }
 
 export interface GraphQLInputFieldConfig {
   description?: Maybe<string>;
   type: GraphQLInputType;
   defaultValue?: unknown;
+  defaultValueLiteral?: ConstValueNode | undefined;
   deprecationReason?: Maybe<string>;
   extensions?: Maybe<Readonly<GraphQLInputFieldExtensions>>;
   astNode?: Maybe<InputValueDefinitionNode>;
@@ -1624,7 +1790,7 @@ export interface GraphQLInputField {
   name: string;
   description: Maybe<string>;
   type: GraphQLInputType;
-  defaultValue: unknown;
+  defaultValue: GraphQLDefaultValueUsage | undefined;
   deprecationReason: Maybe<string>;
   extensions: Readonly<GraphQLInputFieldExtensions>;
   astNode: Maybe<InputValueDefinitionNode>;

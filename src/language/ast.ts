@@ -95,7 +95,7 @@ export class Token {
   readonly prev: Token | null;
   readonly next: Token | null;
 
-  // eslint-disable-next-line max-params
+  // eslint-disable-next-line @typescript-eslint/max-params
   constructor(
     kind: TokenKind,
     start: number,
@@ -146,6 +146,7 @@ export type ASTNode =
   | SelectionSetNode
   | FieldNode
   | ArgumentNode
+  | FragmentArgumentNode
   | FragmentSpreadNode
   | InlineFragmentNode
   | FragmentDefinitionNode
@@ -180,10 +181,7 @@ export type ASTNode =
   | InterfaceTypeExtensionNode
   | UnionTypeExtensionNode
   | EnumTypeExtensionNode
-  | InputObjectTypeExtensionNode
-  | NonNullAssertionNode
-  | ErrorBoundaryNode
-  | ListNullabilityOperatorNode;
+  | InputObjectTypeExtensionNode;
 
 /**
  * Utility type listing all nodes indexed by their kind.
@@ -210,28 +208,22 @@ export const QueryDocumentKeys: {
   VariableDefinition: ['variable', 'type', 'defaultValue', 'directives'],
   Variable: ['name'],
   SelectionSet: ['selections'],
-  Field: [
-    'alias',
+  Field: ['alias', 'name', 'arguments', 'directives', 'selectionSet'],
+  Argument: ['name', 'value'],
+  FragmentArgument: ['name', 'value'],
+
+  FragmentSpread: [
     'name',
+    // Note: Fragment arguments are experimental and may be changed or removed
+    // in the future.
     'arguments',
     'directives',
-    'selectionSet',
-    // Note: Client Controlled Nullability is experimental and may be changed
-    // or removed in the future.
-    'nullabilityAssertion',
   ],
-  Argument: ['name', 'value'],
-  // Note: Client Controlled Nullability is experimental and may be changed
-  // or removed in the future.
-  ListNullabilityOperator: ['nullabilityAssertion'],
-  NonNullAssertion: ['nullabilityAssertion'],
-  ErrorBoundary: ['nullabilityAssertion'],
-
-  FragmentSpread: ['name', 'directives'],
   InlineFragment: ['typeCondition', 'directives', 'selectionSet'],
   FragmentDefinition: [
     'name',
-    // Note: fragment variable definitions are deprecated and will removed in v17.0.0
+    // Note: Fragment variables are experimental and may be changed or removed
+    // in the future.
     'variableDefinitions',
     'typeCondition',
     'directives',
@@ -343,11 +335,12 @@ export interface OperationDefinitionNode {
   readonly selectionSet: SelectionSetNode;
 }
 
-export enum OperationTypeNode {
+enum OperationTypeNode {
   QUERY = 'query',
   MUTATION = 'mutation',
   SUBSCRIPTION = 'subscription',
 }
+export { OperationTypeNode };
 
 export interface VariableDefinitionNode {
   readonly kind: Kind.VARIABLE_DEFINITION;
@@ -378,34 +371,8 @@ export interface FieldNode {
   readonly alias?: NameNode | undefined;
   readonly name: NameNode;
   readonly arguments?: ReadonlyArray<ArgumentNode> | undefined;
-  // Note: Client Controlled Nullability is experimental
-  // and may be changed or removed in the future.
-  readonly nullabilityAssertion?: NullabilityAssertionNode | undefined;
   readonly directives?: ReadonlyArray<DirectiveNode> | undefined;
   readonly selectionSet?: SelectionSetNode | undefined;
-}
-
-export type NullabilityAssertionNode =
-  | NonNullAssertionNode
-  | ErrorBoundaryNode
-  | ListNullabilityOperatorNode;
-
-export interface ListNullabilityOperatorNode {
-  readonly kind: Kind.LIST_NULLABILITY_OPERATOR;
-  readonly loc?: Location | undefined;
-  readonly nullabilityAssertion?: NullabilityAssertionNode | undefined;
-}
-
-export interface NonNullAssertionNode {
-  readonly kind: Kind.NON_NULL_ASSERTION;
-  readonly loc?: Location | undefined;
-  readonly nullabilityAssertion?: ListNullabilityOperatorNode | undefined;
-}
-
-export interface ErrorBoundaryNode {
-  readonly kind: Kind.ERROR_BOUNDARY;
-  readonly loc?: Location | undefined;
-  readonly nullabilityAssertion?: ListNullabilityOperatorNode | undefined;
 }
 
 export interface ArgumentNode {
@@ -422,12 +389,20 @@ export interface ConstArgumentNode {
   readonly value: ConstValueNode;
 }
 
+export interface FragmentArgumentNode {
+  readonly kind: Kind.FRAGMENT_ARGUMENT;
+  readonly loc?: Location | undefined;
+  readonly name: NameNode;
+  readonly value: ValueNode;
+}
+
 /** Fragments */
 
 export interface FragmentSpreadNode {
   readonly kind: Kind.FRAGMENT_SPREAD;
   readonly loc?: Location | undefined;
   readonly name: NameNode;
+  readonly arguments?: ReadonlyArray<FragmentArgumentNode> | undefined;
   readonly directives?: ReadonlyArray<DirectiveNode> | undefined;
 }
 
@@ -443,7 +418,6 @@ export interface FragmentDefinitionNode {
   readonly kind: Kind.FRAGMENT_DEFINITION;
   readonly loc?: Location | undefined;
   readonly name: NameNode;
-  /** @deprecated variableDefinitions will be removed in v17.0.0 */
   readonly variableDefinitions?:
     | ReadonlyArray<VariableDefinitionNode>
     | undefined;

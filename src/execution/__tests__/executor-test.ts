@@ -240,7 +240,19 @@ describe('Execute: Handles basic execution tasks', () => {
     expect(resolvedInfo).to.deep.include({
       fieldNodes: [field],
       path: { prev: undefined, key: 'result', typename: 'Test' },
-      variableValues: { var: 'abc' },
+      variableValues: {
+        sources: {
+          var: {
+            signature: {
+              name: 'var',
+              type: GraphQLString,
+              defaultValue: undefined,
+            },
+            value: 'abc',
+          },
+        },
+        coerced: { var: 'abc' },
+      },
     });
   });
 
@@ -405,7 +417,7 @@ describe('Execute: Handles basic execution tasks', () => {
         throw new Error('Error getting syncError');
       },
       syncRawError() {
-        // eslint-disable-next-line @typescript-eslint/no-throw-literal
+        // eslint-disable-next-line no-throw-literal, @typescript-eslint/only-throw-error
         throw 'Error getting syncRawError';
       },
       syncReturnError() {
@@ -428,11 +440,11 @@ describe('Execute: Handles basic execution tasks', () => {
         );
       },
       asyncRawReject() {
-        // eslint-disable-next-line prefer-promise-reject-errors
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
         return Promise.reject('Error getting asyncRawReject');
       },
       asyncEmptyReject() {
-        // eslint-disable-next-line prefer-promise-reject-errors
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
         return Promise.reject();
       },
       asyncError() {
@@ -442,7 +454,7 @@ describe('Execute: Handles basic execution tasks', () => {
       },
       asyncRawError() {
         return new Promise(() => {
-          // eslint-disable-next-line @typescript-eslint/no-throw-literal
+          // eslint-disable-next-line no-throw-literal, @typescript-eslint/only-throw-error
           throw 'Error getting asyncRawError';
         });
       },
@@ -1246,10 +1258,10 @@ describe('Execute: Handles basic execution tasks', () => {
     expect(asyncResult).to.deep.equal(result);
   });
 
-  it('fails when serialize of custom scalar does not return a value', () => {
+  it('fails when coerceOutputValue of custom scalar does not return a value', () => {
     const customScalar = new GraphQLScalarType({
       name: 'CustomScalar',
-      serialize() {
+      coerceOutputValue() {
         /* returns nothing */
       },
     });
@@ -1271,7 +1283,7 @@ describe('Execute: Handles basic execution tasks', () => {
       errors: [
         {
           message:
-            'Expected `CustomScalar.serialize("CUSTOM_VALUE")` to return non-nullable value, returned: undefined',
+            'Expected `CustomScalar.coerceOutputValue("CUSTOM_VALUE")` to return non-nullable value, returned: undefined',
           locations: [{ line: 1, column: 3 }],
           path: ['customScalar'],
         },

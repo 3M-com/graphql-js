@@ -20,6 +20,13 @@ overrides:
     words:
       - clsx
       - infima
+      - noopener
+      - Vite
+      - craco
+      - esbuild
+      - swcrc
+      - noreferrer
+      - xlink
 
 validateDirectives: true
 ignoreRegExpList:
@@ -43,6 +50,7 @@ words:
 
   # TODO: contribute upstream
   - deno
+  - hashbang
 
   # TODO: remove bellow words
   - QLID # GraphQLID

@@ -53,8 +53,8 @@ const QueryType = new GraphQLObjectType({
         return fromInt !== undefined
           ? fromInt
           : fromString !== undefined
-          ? fromString
-          : fromEnum;
+            ? fromString
+            : fromEnum;
       },
     },
     colorInt: {
@@ -135,8 +135,14 @@ const schema = new GraphQLSchema({
 function executeQuery(
   source: string,
   variableValues?: { readonly [variable: string]: unknown },
+  hideSuggestions = false,
 ) {
-  return graphqlSync({ schema, source, variableValues });
+  return graphqlSync({
+    schema,
+    source,
+    variableValues,
+    hideSuggestions,
+  });
 }
 
 describe('Type System: Enum Values', () => {
@@ -186,6 +192,23 @@ describe('Type System: Enum Values', () => {
         {
           message:
             'Value "GREENISH" does not exist in "Color" enum. Did you mean the enum value "GREEN"?',
+          locations: [{ line: 1, column: 23 }],
+        },
+      ],
+    });
+  });
+
+  it('does not accept values not in the enum (no suggestions)', () => {
+    const result = executeQuery(
+      '{ colorEnum(fromEnum: GREENISH) }',
+      undefined,
+      true,
+    );
+
+    expectJSON(result).toDeepEqual({
+      errors: [
+        {
+          message: 'Value "GREENISH" does not exist in "Color" enum.',
           locations: [{ line: 1, column: 23 }],
         },
       ],
@@ -283,7 +306,7 @@ describe('Type System: Enum Values', () => {
       errors: [
         {
           message:
-            'Variable "$color" got invalid value 2; Enum "Color" cannot represent non-string value: 2.',
+            'Variable "$color" has invalid value: Enum "Color" cannot represent non-string value: 2.',
           locations: [{ line: 1, column: 8 }],
         },
       ],

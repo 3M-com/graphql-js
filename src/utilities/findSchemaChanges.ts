@@ -5,6 +5,7 @@ import { keyMap } from '../jsutils/keyMap.js';
 import { print } from '../language/printer.js';
 
 import type {
+  GraphQLDefaultValueUsage,
   GraphQLEnumType,
   GraphQLField,
   GraphQLInputObjectType,
@@ -34,7 +35,7 @@ import type { GraphQLSchema } from '../type/schema.js';
 import { astFromValue } from './astFromValue.js';
 import { sortValueNode } from './sortValueNode.js';
 
-export enum BreakingChangeType {
+enum BreakingChangeType {
   TYPE_REMOVED = 'TYPE_REMOVED',
   TYPE_CHANGED_KIND = 'TYPE_CHANGED_KIND',
   TYPE_REMOVED_FROM_UNION = 'TYPE_REMOVED_FROM_UNION',
@@ -52,8 +53,9 @@ export enum BreakingChangeType {
   DIRECTIVE_REPEATABLE_REMOVED = 'DIRECTIVE_REPEATABLE_REMOVED',
   DIRECTIVE_LOCATION_REMOVED = 'DIRECTIVE_LOCATION_REMOVED',
 }
+export { BreakingChangeType };
 
-export enum DangerousChangeType {
+enum DangerousChangeType {
   VALUE_ADDED_TO_ENUM = 'VALUE_ADDED_TO_ENUM',
   TYPE_ADDED_TO_UNION = 'TYPE_ADDED_TO_UNION',
   OPTIONAL_INPUT_FIELD_ADDED = 'OPTIONAL_INPUT_FIELD_ADDED',
@@ -61,6 +63,22 @@ export enum DangerousChangeType {
   IMPLEMENTED_INTERFACE_ADDED = 'IMPLEMENTED_INTERFACE_ADDED',
   ARG_DEFAULT_VALUE_CHANGE = 'ARG_DEFAULT_VALUE_CHANGE',
 }
+export { DangerousChangeType };
+
+enum SafeChangeType {
+  TYPE_ADDED = 'TYPE_ADDED',
+  OPTIONAL_INPUT_FIELD_ADDED = 'OPTIONAL_INPUT_FIELD_ADDED',
+  OPTIONAL_ARG_ADDED = 'OPTIONAL_ARG_ADDED',
+  DIRECTIVE_ADDED = 'DIRECTIVE_ADDED',
+  FIELD_ADDED = 'FIELD_ADDED',
+  DIRECTIVE_REPEATABLE_ADDED = 'DIRECTIVE_REPEATABLE_ADDED',
+  DIRECTIVE_LOCATION_ADDED = 'DIRECTIVE_LOCATION_ADDED',
+  OPTIONAL_DIRECTIVE_ARG_ADDED = 'OPTIONAL_DIRECTIVE_ARG_ADDED',
+  FIELD_CHANGED_KIND_SAFE = 'FIELD_CHANGED_KIND_SAFE',
+  ARG_CHANGED_KIND_SAFE = 'ARG_CHANGED_KIND_SAFE',
+  ARG_DEFAULT_VALUE_ADDED = 'ARG_DEFAULT_VALUE_ADDED',
+}
+export { SafeChangeType };
 
 export interface BreakingChange {
   type: BreakingChangeType;
@@ -72,9 +90,18 @@ export interface DangerousChange {
   description: string;
 }
 
+export interface SafeChange {
+  type: SafeChangeType;
+  description: string;
+}
+
+export type SchemaChange = SafeChange | DangerousChange | BreakingChange;
+
 /**
  * Given two schemas, returns an Array containing descriptions of all the types
  * of breaking changes covered by the other functions down below.
+ *
+ * @deprecated Please use `findSchemaChanges` instead. Will be removed in v18.
  */
 export function findBreakingChanges(
   oldSchema: GraphQLSchema,
@@ -89,6 +116,8 @@ export function findBreakingChanges(
 /**
  * Given two schemas, returns an Array containing descriptions of all the types
  * of potentially dangerous changes covered by the other functions down below.
+ *
+ * @deprecated Please use `findSchemaChanges` instead. Will be removed in v18.
  */
 export function findDangerousChanges(
   oldSchema: GraphQLSchema,
@@ -100,10 +129,10 @@ export function findDangerousChanges(
   );
 }
 
-function findSchemaChanges(
+export function findSchemaChanges(
   oldSchema: GraphQLSchema,
   newSchema: GraphQLSchema,
-): Array<BreakingChange | DangerousChange> {
+): Array<SchemaChange> {
   return [
     ...findTypeChanges(oldSchema, newSchema),
     ...findDirectiveChanges(oldSchema, newSchema),
@@ -113,7 +142,7 @@ function findSchemaChanges(
 function findDirectiveChanges(
   oldSchema: GraphQLSchema,
   newSchema: GraphQLSchema,
-): Array<BreakingChange | DangerousChange> {
+): Array<SchemaChange> {
   const schemaChanges = [];
 
   const directivesDiff = diff(
@@ -124,7 +153,14 @@ function findDirectiveChanges(
   for (const oldDirective of directivesDiff.removed) {
     schemaChanges.push({
       type: BreakingChangeType.DIRECTIVE_REMOVED,
-      description: `${oldDirective.name} was removed.`,
+      description: `Directive @${oldDirective.name} was removed.`,
+    });
+  }
+
+  for (const newDirective of directivesDiff.added) {
+    schemaChanges.push({
+      type: SafeChangeType.DIRECTIVE_ADDED,
+      description: `Directive @${newDirective.name} was added.`,
     });
   }
 
@@ -135,7 +171,12 @@ function findDirectiveChanges(
       if (isRequiredArgument(newArg)) {
         schemaChanges.push({
           type: BreakingChangeType.REQUIRED_DIRECTIVE_ARG_ADDED,
-          description: `A required arg ${newArg.name} on directive ${oldDirective.name} was added.`,
+          description: `A required argument @${oldDirective.name}(${newArg.name}:) was added.`,
+        });
+      } else {
+        schemaChanges.push({
+          type: SafeChangeType.OPTIONAL_DIRECTIVE_ARG_ADDED,
+          description: `An optional argument @${oldDirective.name}(${newArg.name}:) was added.`,
         });
       }
     }
@@ -143,14 +184,19 @@ function findDirectiveChanges(
     for (const oldArg of argsDiff.removed) {
       schemaChanges.push({
         type: BreakingChangeType.DIRECTIVE_ARG_REMOVED,
-        description: `${oldArg.name} was removed from ${oldDirective.name}.`,
+        description: `Argument @${oldDirective.name}(${oldArg.name}:) was removed.`,
       });
     }
 
     if (oldDirective.isRepeatable && !newDirective.isRepeatable) {
       schemaChanges.push({
         type: BreakingChangeType.DIRECTIVE_REPEATABLE_REMOVED,
-        description: `Repeatable flag was removed from ${oldDirective.name}.`,
+        description: `Repeatable flag was removed from @${oldDirective.name}.`,
+      });
+    } else if (newDirective.isRepeatable && !oldDirective.isRepeatable) {
+      schemaChanges.push({
+        type: SafeChangeType.DIRECTIVE_REPEATABLE_ADDED,
+        description: `Repeatable flag was added to @${oldDirective.name}.`,
       });
     }
 
@@ -158,7 +204,16 @@ function findDirectiveChanges(
       if (!newDirective.locations.includes(location)) {
         schemaChanges.push({
           type: BreakingChangeType.DIRECTIVE_LOCATION_REMOVED,
-          description: `${location} was removed from ${oldDirective.name}.`,
+          description: `${location} was removed from @${oldDirective.name}.`,
+        });
+      }
+    }
+
+    for (const location of newDirective.locations) {
+      if (!oldDirective.locations.includes(location)) {
+        schemaChanges.push({
+          type: SafeChangeType.DIRECTIVE_LOCATION_ADDED,
+          description: `${location} was added to @${oldDirective.name}.`,
         });
       }
     }
@@ -170,7 +225,7 @@ function findDirectiveChanges(
 function findTypeChanges(
   oldSchema: GraphQLSchema,
   newSchema: GraphQLSchema,
-): Array<BreakingChange | DangerousChange> {
+): Array<SchemaChange> {
   const schemaChanges = [];
 
   const typesDiff = diff(
@@ -182,8 +237,15 @@ function findTypeChanges(
     schemaChanges.push({
       type: BreakingChangeType.TYPE_REMOVED,
       description: isSpecifiedScalarType(oldType)
-        ? `Standard scalar ${oldType.name} was removed because it is not referenced anymore.`
-        : `${oldType.name} was removed.`,
+        ? `Standard scalar ${oldType} was removed because it is not referenced anymore.`
+        : `${oldType} was removed.`,
+    });
+  }
+
+  for (const newType of typesDiff.added) {
+    schemaChanges.push({
+      type: SafeChangeType.TYPE_ADDED,
+      description: `${newType} was added.`,
     });
   }
 
@@ -208,7 +270,7 @@ function findTypeChanges(
       schemaChanges.push({
         type: BreakingChangeType.TYPE_CHANGED_KIND,
         description:
-          `${oldType.name} changed from ` +
+          `${oldType} changed from ` +
           `${typeKindName(oldType)} to ${typeKindName(newType)}.`,
       });
     }
@@ -220,7 +282,7 @@ function findTypeChanges(
 function findInputObjectTypeChanges(
   oldType: GraphQLInputObjectType,
   newType: GraphQLInputObjectType,
-): Array<BreakingChange | DangerousChange> {
+): Array<SchemaChange> {
   const schemaChanges = [];
   const fieldsDiff = diff(
     Object.values(oldType.getFields()),
@@ -231,12 +293,12 @@ function findInputObjectTypeChanges(
     if (isRequiredInputField(newField)) {
       schemaChanges.push({
         type: BreakingChangeType.REQUIRED_INPUT_FIELD_ADDED,
-        description: `A required field ${newField.name} on input type ${oldType.name} was added.`,
+        description: `A required field ${oldType}.${newField.name} was added.`,
       });
     } else {
       schemaChanges.push({
         type: DangerousChangeType.OPTIONAL_INPUT_FIELD_ADDED,
-        description: `An optional field ${newField.name} on input type ${oldType.name} was added.`,
+        description: `An optional field ${oldType}.${newField.name} was added.`,
       });
     }
   }
@@ -244,7 +306,7 @@ function findInputObjectTypeChanges(
   for (const oldField of fieldsDiff.removed) {
     schemaChanges.push({
       type: BreakingChangeType.FIELD_REMOVED,
-      description: `${oldType.name}.${oldField.name} was removed.`,
+      description: `Field ${oldType}.${oldField.name} was removed.`,
     });
   }
 
@@ -257,7 +319,14 @@ function findInputObjectTypeChanges(
       schemaChanges.push({
         type: BreakingChangeType.FIELD_CHANGED_KIND,
         description:
-          `${oldType.name}.${oldField.name} changed type from ` +
+          `Field ${oldType}.${oldField.name} changed type from ` +
+          `${String(oldField.type)} to ${String(newField.type)}.`,
+      });
+    } else {
+      schemaChanges.push({
+        type: SafeChangeType.FIELD_CHANGED_KIND_SAFE,
+        description:
+          `Field ${oldType}.${oldField.name} changed type from ` +
           `${String(oldField.type)} to ${String(newField.type)}.`,
       });
     }
@@ -276,14 +345,14 @@ function findUnionTypeChanges(
   for (const newPossibleType of possibleTypesDiff.added) {
     schemaChanges.push({
       type: DangerousChangeType.TYPE_ADDED_TO_UNION,
-      description: `${newPossibleType.name} was added to union type ${oldType.name}.`,
+      description: `${newPossibleType} was added to union type ${oldType}.`,
     });
   }
 
   for (const oldPossibleType of possibleTypesDiff.removed) {
     schemaChanges.push({
       type: BreakingChangeType.TYPE_REMOVED_FROM_UNION,
-      description: `${oldPossibleType.name} was removed from union type ${oldType.name}.`,
+      description: `${oldPossibleType} was removed from union type ${oldType}.`,
     });
   }
 
@@ -300,14 +369,14 @@ function findEnumTypeChanges(
   for (const newValue of valuesDiff.added) {
     schemaChanges.push({
       type: DangerousChangeType.VALUE_ADDED_TO_ENUM,
-      description: `${newValue.name} was added to enum type ${oldType.name}.`,
+      description: `Enum value ${oldType}.${newValue.name} was added.`,
     });
   }
 
   for (const oldValue of valuesDiff.removed) {
     schemaChanges.push({
       type: BreakingChangeType.VALUE_REMOVED_FROM_ENUM,
-      description: `${oldValue.name} was removed from enum type ${oldType.name}.`,
+      description: `Enum value ${oldType}.${oldValue.name} was removed.`,
     });
   }
 
@@ -324,14 +393,14 @@ function findImplementedInterfacesChanges(
   for (const newInterface of interfacesDiff.added) {
     schemaChanges.push({
       type: DangerousChangeType.IMPLEMENTED_INTERFACE_ADDED,
-      description: `${newInterface.name} added to interfaces implemented by ${oldType.name}.`,
+      description: `${newInterface.name} added to interfaces implemented by ${oldType}.`,
     });
   }
 
   for (const oldInterface of interfacesDiff.removed) {
     schemaChanges.push({
       type: BreakingChangeType.IMPLEMENTED_INTERFACE_REMOVED,
-      description: `${oldType.name} no longer implements interface ${oldInterface.name}.`,
+      description: `${oldType} no longer implements interface ${oldInterface.name}.`,
     });
   }
 
@@ -341,7 +410,7 @@ function findImplementedInterfacesChanges(
 function findFieldChanges(
   oldType: GraphQLObjectType | GraphQLInterfaceType,
   newType: GraphQLObjectType | GraphQLInterfaceType,
-): Array<BreakingChange | DangerousChange> {
+): Array<SchemaChange> {
   const schemaChanges = [];
   const fieldsDiff = diff(
     Object.values(oldType.getFields()),
@@ -351,7 +420,14 @@ function findFieldChanges(
   for (const oldField of fieldsDiff.removed) {
     schemaChanges.push({
       type: BreakingChangeType.FIELD_REMOVED,
-      description: `${oldType.name}.${oldField.name} was removed.`,
+      description: `Field ${oldType}.${oldField.name} was removed.`,
+    });
+  }
+
+  for (const newField of fieldsDiff.added) {
+    schemaChanges.push({
+      type: SafeChangeType.FIELD_ADDED,
+      description: `Field ${oldType}.${newField.name} was added.`,
     });
   }
 
@@ -366,7 +442,14 @@ function findFieldChanges(
       schemaChanges.push({
         type: BreakingChangeType.FIELD_CHANGED_KIND,
         description:
-          `${oldType.name}.${oldField.name} changed type from ` +
+          `Field ${oldType}.${oldField.name} changed type from ` +
+          `${String(oldField.type)} to ${String(newField.type)}.`,
+      });
+    } else if (oldField.type.toString() !== newField.type.toString()) {
+      schemaChanges.push({
+        type: SafeChangeType.FIELD_CHANGED_KIND_SAFE,
+        description:
+          `Field ${oldType}.${oldField.name} changed type from ` +
           `${String(oldField.type)} to ${String(newField.type)}.`,
       });
     }
@@ -379,14 +462,14 @@ function findArgChanges(
   oldType: GraphQLObjectType | GraphQLInterfaceType,
   oldField: GraphQLField<unknown, unknown>,
   newField: GraphQLField<unknown, unknown>,
-): Array<BreakingChange | DangerousChange> {
+): Array<SchemaChange> {
   const schemaChanges = [];
   const argsDiff = diff(oldField.args, newField.args);
 
   for (const oldArg of argsDiff.removed) {
     schemaChanges.push({
       type: BreakingChangeType.ARG_REMOVED,
-      description: `${oldType.name}.${oldField.name} arg ${oldArg.name} was removed.`,
+      description: `Argument ${oldType}.${oldField.name}(${oldArg.name}:) was removed.`,
     });
   }
 
@@ -399,14 +482,14 @@ function findArgChanges(
       schemaChanges.push({
         type: BreakingChangeType.ARG_CHANGED_KIND,
         description:
-          `${oldType.name}.${oldField.name} arg ${oldArg.name} has changed type from ` +
+          `Argument ${oldType}.${oldField.name}(${oldArg.name}:) has changed type from ` +
           `${String(oldArg.type)} to ${String(newArg.type)}.`,
       });
     } else if (oldArg.defaultValue !== undefined) {
       if (newArg.defaultValue === undefined) {
         schemaChanges.push({
           type: DangerousChangeType.ARG_DEFAULT_VALUE_CHANGE,
-          description: `${oldType.name}.${oldField.name} arg ${oldArg.name} defaultValue was removed.`,
+          description: `${oldType}.${oldField.name}(${oldArg.name}:) defaultValue was removed.`,
         });
       } else {
         // Since we looking only for client's observable changes we should
@@ -418,10 +501,26 @@ function findArgChanges(
         if (oldValueStr !== newValueStr) {
           schemaChanges.push({
             type: DangerousChangeType.ARG_DEFAULT_VALUE_CHANGE,
-            description: `${oldType.name}.${oldField.name} arg ${oldArg.name} has changed defaultValue from ${oldValueStr} to ${newValueStr}.`,
+            description: `${oldType}.${oldField.name}(${oldArg.name}:) has changed defaultValue from ${oldValueStr} to ${newValueStr}.`,
           });
         }
       }
+    } else if (
+      newArg.defaultValue !== undefined &&
+      oldArg.defaultValue === undefined
+    ) {
+      const newValueStr = stringifyValue(newArg.defaultValue, newArg.type);
+      schemaChanges.push({
+        type: SafeChangeType.ARG_DEFAULT_VALUE_ADDED,
+        description: `${oldType}.${oldField.name}(${oldArg.name}:) added a defaultValue ${newValueStr}.`,
+      });
+    } else {
+      schemaChanges.push({
+        type: SafeChangeType.ARG_CHANGED_KIND_SAFE,
+        description:
+          `Argument ${oldType}.${oldField.name}(${oldArg.name}:) has changed type from ` +
+          `${String(oldArg.type)} to ${String(newArg.type)}.`,
+      });
     }
   }
 
@@ -429,12 +528,12 @@ function findArgChanges(
     if (isRequiredArgument(newArg)) {
       schemaChanges.push({
         type: BreakingChangeType.REQUIRED_ARG_ADDED,
-        description: `A required arg ${newArg.name} on ${oldType.name}.${oldField.name} was added.`,
+        description: `A required argument ${oldType}.${oldField.name}(${newArg.name}:) was added.`,
       });
     } else {
       schemaChanges.push({
         type: DangerousChangeType.OPTIONAL_ARG_ADDED,
-        description: `An optional arg ${newArg.name} on ${oldType.name}.${oldField.name} was added.`,
+        description: `An optional argument ${oldType}.${oldField.name}(${newArg.name}:) was added.`,
       });
     }
   }
@@ -532,8 +631,11 @@ function typeKindName(type: GraphQLNamedType): string {
   invariant(false, 'Unexpected type: ' + inspect(type));
 }
 
-function stringifyValue(value: unknown, type: GraphQLInputType): string {
-  const ast = astFromValue(value, type);
+function stringifyValue(
+  defaultValue: GraphQLDefaultValueUsage,
+  type: GraphQLInputType,
+): string {
+  const ast = defaultValue.literal ?? astFromValue(defaultValue.value, type);
   invariant(ast != null);
   return print(sortValueNode(ast));
 }

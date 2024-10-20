@@ -199,6 +199,10 @@ export type {
   GraphQLScalarSerializer,
   GraphQLScalarValueParser,
   GraphQLScalarLiteralParser,
+  GraphQLScalarOutputValueCoercer,
+  GraphQLScalarInputValueCoercer,
+  GraphQLScalarInputLiteralCoercer,
+  GraphQLDefaultValueUsage,
 } from './type/index.js';
 
 // Parse and operate on GraphQL language source files.
@@ -232,7 +236,6 @@ export {
   isDefinitionNode,
   isExecutableDefinitionNode,
   isSelectionNode,
-  isNullabilityAssertionNode,
   isValueNode,
   isConstValueNode,
   isTypeNode,
@@ -264,10 +267,7 @@ export type {
   SelectionNode,
   FieldNode,
   ArgumentNode,
-  NullabilityAssertionNode,
-  NonNullAssertionNode,
-  ErrorBoundaryNode,
-  ListNullabilityOperatorNode,
+  FragmentArgumentNode,
   ConstArgumentNode,
   FragmentSpreadNode,
   InlineFragmentNode,
@@ -320,7 +320,10 @@ export type {
 // Execute GraphQL queries.
 export {
   execute,
+  executeQueryOrMutationOrSubscriptionEvent,
+  executeSubscriptionEvent,
   experimentalExecuteIncrementally,
+  experimentalExecuteQueryOrMutationOrSubscriptionEvent,
   executeSync,
   defaultFieldResolver,
   defaultTypeResolver,
@@ -334,6 +337,7 @@ export {
 
 export type {
   ExecutionArgs,
+  ValidatedExecutionArgs,
   ExecutionResult,
   ExperimentalIncrementalExecutionResults,
   InitialIncrementalExecutionResult,
@@ -439,6 +443,7 @@ export {
   // Create a GraphQLType from a GraphQL language AST.
   typeFromAST,
   // Create a JavaScript value from a GraphQL language AST with a Type.
+  /** @deprecated use `coerceInputLiteral()` instead - will be removed in v18 */
   valueFromAST,
   // Create a JavaScript value from a GraphQL language AST without a Type.
   valueFromASTUntyped,
@@ -447,8 +452,18 @@ export {
   // A helper to use within recursive-descent visitors which need to be aware of the GraphQL type system.
   TypeInfo,
   visitWithTypeInfo,
-  // Coerces a JavaScript value to a GraphQL type, or produces errors.
+  // Converts a value to a const value by replacing variables.
+  replaceVariables,
+  // Create a GraphQL literal (AST) from a JavaScript input value.
+  valueToLiteral,
+  // Coerces a JavaScript value to a GraphQL type, or returns undefined.
   coerceInputValue,
+  // Coerces a GraphQL literal (AST) to a GraphQL type, or returns undefined.
+  coerceInputLiteral,
+  // Validate a JavaScript value with a GraphQL type, collecting all errors.
+  validateInputValue,
+  // Validate a GraphQL literal (AST) with a GraphQL type, collecting all errors.
+  validateInputLiteral,
   // Concatenates multiple AST together.
   concatAST,
   // Separates an AST into an AST per Operation.
@@ -462,8 +477,10 @@ export {
   // Compares two GraphQLSchemas and detects breaking changes.
   BreakingChangeType,
   DangerousChangeType,
+  SafeChangeType,
   findBreakingChanges,
   findDangerousChanges,
+  findSchemaChanges,
 } from './utilities/index.js';
 
 export type {
@@ -491,6 +508,7 @@ export type {
   IntrospectionDirective,
   BuildSchemaOptions,
   BreakingChange,
+  SafeChange,
   DangerousChange,
   TypedQueryDocumentNode,
 } from './utilities/index.js';

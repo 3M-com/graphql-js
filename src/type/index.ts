@@ -119,6 +119,10 @@ export type {
   GraphQLScalarSerializer,
   GraphQLScalarValueParser,
   GraphQLScalarLiteralParser,
+  GraphQLScalarOutputValueCoercer,
+  GraphQLScalarInputValueCoercer,
+  GraphQLScalarInputLiteralCoercer,
+  GraphQLDefaultValueUsage,
 } from './definition.js';
 
 export {

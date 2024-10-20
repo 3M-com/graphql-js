@@ -7,9 +7,10 @@ import type { GraphQLError } from '../error/GraphQLError.js';
 import { IncrementalGraph } from './IncrementalGraph.js';
 import type {
   CancellableStreamRecord,
+  CompletedExecutionGroup,
   CompletedResult,
   DeferredFragmentRecord,
-  DeferredGroupedFieldSetResult,
+  DeliveryGroup,
   ExperimentalIncrementalExecutionResults,
   IncrementalDataRecord,
   IncrementalDataRecordResult,
@@ -20,12 +21,11 @@ import type {
   PendingResult,
   StreamItemsResult,
   SubsequentIncrementalExecutionResult,
-  SubsequentResultRecord,
 } from './types.js';
 import {
   isCancellableStreamRecord,
-  isDeferredGroupedFieldSetResult,
-  isNonReconcilableDeferredGroupedFieldSetResult,
+  isCompletedExecutionGroup,
+  isFailedExecutionGroup,
 } from './types.js';
 
 export function buildIncrementalResponse(
@@ -74,10 +74,11 @@ class IncrementalPublisher {
     errors: ReadonlyArray<GraphQLError> | undefined,
     incrementalDataRecords: ReadonlyArray<IncrementalDataRecord>,
   ): ExperimentalIncrementalExecutionResults {
-    this._incrementalGraph.addIncrementalDataRecords(incrementalDataRecords);
-    const newPending = this._incrementalGraph.getNewPending();
+    const newRootNodes = this._incrementalGraph.getNewRootNodes(
+      incrementalDataRecords,
+    );
 
-    const pending = this._pendingSourcesToResults(newPending);
+    const pending = this._toPendingResults(newRootNodes);
 
     const initialResult: InitialIncrementalExecutionResult =
       errors === undefined
@@ -90,19 +91,19 @@ class IncrementalPublisher {
     };
   }
 
-  private _pendingSourcesToResults(
-    newPending: ReadonlyArray<SubsequentResultRecord>,
+  private _toPendingResults(
+    newRootNodes: ReadonlyArray<DeliveryGroup>,
   ): Array<PendingResult> {
     const pendingResults: Array<PendingResult> = [];
-    for (const pendingSource of newPending) {
+    for (const node of newRootNodes) {
       const id = String(this._getNextId());
-      pendingSource.id = id;
+      node.id = id;
       const pendingResult: PendingResult = {
         id,
-        path: pathToArray(pendingSource.path),
+        path: pathToArray(node.path),
       };
-      if (pendingSource.label !== undefined) {
-        pendingResult.label = pendingSource.label;
+      if (node.label !== undefined) {
+        pendingResult.label = node.label;
       }
       pendingResults.push(pendingResult);
     }
@@ -134,14 +135,10 @@ class IncrementalPublisher {
         completed: [],
       };
 
-      const completedIncrementalData =
-        this._incrementalGraph.completedIncrementalData();
-      // use the raw iterator rather than 'for await ... of' so as not to trigger the
-      // '.return()' method on the iterator when exiting the loop with the next value
-      const asyncIterator = completedIncrementalData[Symbol.asyncIterator]();
-      let iteration = await asyncIterator.next();
-      while (!iteration.done) {
-        for (const completedResult of iteration.value) {
+      let batch: Iterable<IncrementalDataRecordResult> | undefined =
+        this._incrementalGraph.currentCompletedBatch();
+      do {
+        for (const completedResult of batch) {
           this._handleCompletedIncrementalData(completedResult, context);
         }
 
@@ -150,7 +147,6 @@ class IncrementalPublisher {
           const hasNext = this._incrementalGraph.hasNext();
 
           if (!hasNext) {
-            // eslint-disable-next-line require-atomic-updates
             isDone = true;
           }
 
@@ -172,8 +168,8 @@ class IncrementalPublisher {
         }
 
         // eslint-disable-next-line no-await-in-loop
-        iteration = await asyncIterator.next();
-      }
+        batch = await this._incrementalGraph.nextCompletedBatch();
+      } while (batch !== undefined);
 
       await this._returnAsyncIteratorsIgnoringErrors();
       return { value: undefined, done: true };
@@ -183,6 +179,7 @@ class IncrementalPublisher {
       IteratorResult<SubsequentIncrementalExecutionResult, void>
     > => {
       isDone = true;
+      this._incrementalGraph.abort();
       await this._returnAsyncIterators();
       return { value: undefined, done: true };
     };
@@ -191,7 +188,9 @@ class IncrementalPublisher {
       error?: unknown,
     ): Promise<IteratorResult<SubsequentIncrementalExecutionResult, void>> => {
       isDone = true;
+      this._incrementalGraph.abort();
       await this._returnAsyncIterators();
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
       return Promise.reject(error);
     };
 
@@ -209,29 +208,20 @@ class IncrementalPublisher {
     completedIncrementalData: IncrementalDataRecordResult,
     context: SubsequentIncrementalExecutionResultContext,
   ): void {
-    if (isDeferredGroupedFieldSetResult(completedIncrementalData)) {
-      this._handleCompletedDeferredGroupedFieldSet(
-        completedIncrementalData,
-        context,
-      );
+    if (isCompletedExecutionGroup(completedIncrementalData)) {
+      this._handleCompletedExecutionGroup(completedIncrementalData, context);
     } else {
       this._handleCompletedStreamItems(completedIncrementalData, context);
     }
-    const newPending = this._incrementalGraph.getNewPending();
-    context.pending.push(...this._pendingSourcesToResults(newPending));
   }
 
-  private _handleCompletedDeferredGroupedFieldSet(
-    deferredGroupedFieldSetResult: DeferredGroupedFieldSetResult,
+  private _handleCompletedExecutionGroup(
+    completedExecutionGroup: CompletedExecutionGroup,
     context: SubsequentIncrementalExecutionResultContext,
   ): void {
-    if (
-      isNonReconcilableDeferredGroupedFieldSetResult(
-        deferredGroupedFieldSetResult,
-      )
-    ) {
-      for (const deferredFragmentRecord of deferredGroupedFieldSetResult
-        .deferredGroupedFieldSetRecord.deferredFragmentRecords) {
+    if (isFailedExecutionGroup(completedExecutionGroup)) {
+      for (const deferredFragmentRecord of completedExecutionGroup
+        .pendingExecutionGroup.deferredFragmentRecords) {
         const id = deferredFragmentRecord.id;
         if (
           !this._incrementalGraph.removeDeferredFragment(deferredFragmentRecord)
@@ -242,40 +232,37 @@ class IncrementalPublisher {
         invariant(id !== undefined);
         context.completed.push({
           id,
-          errors: deferredGroupedFieldSetResult.errors,
+          errors: completedExecutionGroup.errors,
         });
       }
       return;
     }
 
-    this._incrementalGraph.addCompletedReconcilableDeferredGroupedFieldSet(
-      deferredGroupedFieldSetResult,
+    this._incrementalGraph.addCompletedSuccessfulExecutionGroup(
+      completedExecutionGroup,
     );
 
-    const incrementalDataRecords =
-      deferredGroupedFieldSetResult.incrementalDataRecords;
-    if (incrementalDataRecords !== undefined) {
-      this._incrementalGraph.addIncrementalDataRecords(incrementalDataRecords);
-    }
-
-    for (const deferredFragmentRecord of deferredGroupedFieldSetResult
-      .deferredGroupedFieldSetRecord.deferredFragmentRecords) {
-      const reconcilableResults =
-        this._incrementalGraph.completeDeferredFragment(deferredFragmentRecord);
-      if (reconcilableResults === undefined) {
+    for (const deferredFragmentRecord of completedExecutionGroup
+      .pendingExecutionGroup.deferredFragmentRecords) {
+      const completion = this._incrementalGraph.completeDeferredFragment(
+        deferredFragmentRecord,
+      );
+      if (completion === undefined) {
         continue;
       }
       const id = deferredFragmentRecord.id;
       invariant(id !== undefined);
       const incremental = context.incremental;
-      for (const reconcilableResult of reconcilableResults) {
+      const { newRootNodes, successfulExecutionGroups } = completion;
+      context.pending.push(...this._toPendingResults(newRootNodes));
+      for (const successfulExecutionGroup of successfulExecutionGroups) {
         const { bestId, subPath } = this._getBestIdAndSubPath(
           id,
           deferredFragmentRecord,
-          reconcilableResult,
+          successfulExecutionGroup,
         );
         const incrementalEntry: IncrementalDeferResult = {
-          ...reconcilableResult.result,
+          ...successfulExecutionGroup.result,
           id: bestId,
         };
         if (subPath !== undefined) {
@@ -323,10 +310,12 @@ class IncrementalPublisher {
 
       context.incremental.push(incrementalEntry);
 
-      if (streamItemsResult.incrementalDataRecords !== undefined) {
-        this._incrementalGraph.addIncrementalDataRecords(
-          streamItemsResult.incrementalDataRecords,
+      const incrementalDataRecords = streamItemsResult.incrementalDataRecords;
+      if (incrementalDataRecords !== undefined) {
+        const newRootNodes = this._incrementalGraph.getNewRootNodes(
+          incrementalDataRecords,
         );
+        context.pending.push(...this._toPendingResults(newRootNodes));
       }
     }
   }
@@ -334,13 +323,13 @@ class IncrementalPublisher {
   private _getBestIdAndSubPath(
     initialId: string,
     initialDeferredFragmentRecord: DeferredFragmentRecord,
-    deferredGroupedFieldSetResult: DeferredGroupedFieldSetResult,
+    completedExecutionGroup: CompletedExecutionGroup,
   ): { bestId: string; subPath: ReadonlyArray<string | number> | undefined } {
     let maxLength = pathToArray(initialDeferredFragmentRecord.path).length;
     let bestId = initialId;
 
-    for (const deferredFragmentRecord of deferredGroupedFieldSetResult
-      .deferredGroupedFieldSetRecord.deferredFragmentRecords) {
+    for (const deferredFragmentRecord of completedExecutionGroup
+      .pendingExecutionGroup.deferredFragmentRecords) {
       if (deferredFragmentRecord === initialDeferredFragmentRecord) {
         continue;
       }
@@ -357,7 +346,7 @@ class IncrementalPublisher {
         bestId = id;
       }
     }
-    const subPath = deferredGroupedFieldSetResult.path.slice(maxLength);
+    const subPath = completedExecutionGroup.path.slice(maxLength);
     return {
       bestId,
       subPath: subPath.length > 0 ? subPath : undefined,
@@ -365,8 +354,6 @@ class IncrementalPublisher {
   }
 
   private async _returnAsyncIterators(): Promise<void> {
-    await this._incrementalGraph.completedIncrementalData().return();
-
     const cancellableStreams = this._context.cancellableStreams;
     if (cancellableStreams === undefined) {
       return;

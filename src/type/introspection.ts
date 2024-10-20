@@ -74,7 +74,7 @@ export const __Schema: GraphQLObjectType = new GraphQLObjectType({
         ),
         resolve: (schema) => schema.getDirectives(),
       },
-    } as GraphQLFieldConfigMap<GraphQLSchema, unknown>),
+    }) as GraphQLFieldConfigMap<GraphQLSchema, unknown>,
 });
 
 export const __Directive: GraphQLObjectType = new GraphQLObjectType({
@@ -117,7 +117,7 @@ export const __Directive: GraphQLObjectType = new GraphQLObjectType({
             : field.args.filter((arg) => arg.deprecationReason == null);
         },
       },
-    } as GraphQLFieldConfigMap<GraphQLDirective, unknown>),
+    }) as GraphQLFieldConfigMap<GraphQLDirective, unknown>,
 });
 
 export const __DirectiveLocation: GraphQLEnumType = new GraphQLEnumType({
@@ -155,7 +155,11 @@ export const __DirectiveLocation: GraphQLEnumType = new GraphQLEnumType({
     },
     VARIABLE_DEFINITION: {
       value: DirectiveLocation.VARIABLE_DEFINITION,
-      description: 'Location adjacent to a variable definition.',
+      description: 'Location adjacent to an operation variable definition.',
+    },
+    FRAGMENT_VARIABLE_DEFINITION: {
+      value: DirectiveLocation.FRAGMENT_VARIABLE_DEFINITION,
+      description: 'Location adjacent to a fragment variable definition.',
     },
     SCHEMA: {
       value: DirectiveLocation.SCHEMA,
@@ -331,7 +335,7 @@ export const __Type: GraphQLObjectType = new GraphQLObjectType({
           }
         },
       },
-    } as GraphQLFieldConfigMap<GraphQLType, unknown>),
+    }) as GraphQLFieldConfigMap<GraphQLType, unknown>,
 });
 
 export const __Field: GraphQLObjectType = new GraphQLObjectType({
@@ -376,7 +380,7 @@ export const __Field: GraphQLObjectType = new GraphQLObjectType({
         type: GraphQLString,
         resolve: (field) => field.deprecationReason,
       },
-    } as GraphQLFieldConfigMap<GraphQLField<unknown, unknown>, unknown>),
+    }) as GraphQLFieldConfigMap<GraphQLField<unknown, unknown>, unknown>,
 });
 
 export const __InputValue: GraphQLObjectType = new GraphQLObjectType({
@@ -403,8 +407,13 @@ export const __InputValue: GraphQLObjectType = new GraphQLObjectType({
           'A GraphQL-formatted string representing the default value for this input value.',
         resolve(inputValue) {
           const { type, defaultValue } = inputValue;
-          const valueAST = astFromValue(defaultValue, type);
-          return valueAST ? print(valueAST) : null;
+          if (!defaultValue) {
+            return null;
+          }
+          const literal =
+            defaultValue.literal ?? astFromValue(defaultValue.value, type);
+          invariant(literal != null, 'Invalid default value');
+          return print(literal);
         },
       },
       isDeprecated: {
@@ -415,7 +424,7 @@ export const __InputValue: GraphQLObjectType = new GraphQLObjectType({
         type: GraphQLString,
         resolve: (obj) => obj.deprecationReason,
       },
-    } as GraphQLFieldConfigMap<GraphQLInputField, unknown>),
+    }) as GraphQLFieldConfigMap<GraphQLInputField, unknown>,
 });
 
 export const __EnumValue: GraphQLObjectType = new GraphQLObjectType({
@@ -440,10 +449,10 @@ export const __EnumValue: GraphQLObjectType = new GraphQLObjectType({
         type: GraphQLString,
         resolve: (enumValue) => enumValue.deprecationReason,
       },
-    } as GraphQLFieldConfigMap<GraphQLEnumValue, unknown>),
+    }) as GraphQLFieldConfigMap<GraphQLEnumValue, unknown>,
 });
 
-export enum TypeKind {
+enum TypeKind {
   SCALAR = 'SCALAR',
   OBJECT = 'OBJECT',
   INTERFACE = 'INTERFACE',
@@ -453,6 +462,7 @@ export enum TypeKind {
   LIST = 'LIST',
   NON_NULL = 'NON_NULL',
 }
+export { TypeKind };
 
 export const __TypeKind: GraphQLEnumType = new GraphQLEnumType({
   name: '__TypeKind',
