@@ -32,7 +32,7 @@ describe('Introspection', () => {
     expect(result).to.deep.equal({
       data: {
         __schema: {
-          queryType: { name: 'SomeObject' },
+          queryType: { name: 'SomeObject', kind: 'OBJECT' },
           mutationType: null,
           subscriptionType: null,
           types: [
@@ -242,9 +242,13 @@ describe('Introspection', () => {
                     {
                       name: 'includeDeprecated',
                       type: {
-                        kind: 'SCALAR',
-                        name: 'Boolean',
-                        ofType: null,
+                        kind: 'NON_NULL',
+                        name: null,
+                        ofType: {
+                          kind: 'SCALAR',
+                          name: 'Boolean',
+                          ofType: null,
+                        },
                       },
                       defaultValue: 'false',
                     },
@@ -309,9 +313,13 @@ describe('Introspection', () => {
                     {
                       name: 'includeDeprecated',
                       type: {
-                        kind: 'SCALAR',
-                        name: 'Boolean',
-                        ofType: null,
+                        kind: 'NON_NULL',
+                        name: null,
+                        ofType: {
+                          kind: 'SCALAR',
+                          name: 'Boolean',
+                          ofType: null,
+                        },
                       },
                       defaultValue: 'false',
                     },
@@ -338,9 +346,13 @@ describe('Introspection', () => {
                     {
                       name: 'includeDeprecated',
                       type: {
-                        kind: 'SCALAR',
-                        name: 'Boolean',
-                        ofType: null,
+                        kind: 'NON_NULL',
+                        name: null,
+                        ofType: {
+                          kind: 'SCALAR',
+                          name: 'Boolean',
+                          ofType: null,
+                        },
                       },
                       defaultValue: 'false',
                     },
@@ -477,9 +489,13 @@ describe('Introspection', () => {
                     {
                       name: 'includeDeprecated',
                       type: {
-                        kind: 'SCALAR',
-                        name: 'Boolean',
-                        ofType: null,
+                        kind: 'NON_NULL',
+                        name: null,
+                        ofType: {
+                          kind: 'SCALAR',
+                          name: 'Boolean',
+                          ofType: null,
+                        },
                       },
                       defaultValue: 'false',
                     },
@@ -778,9 +794,13 @@ describe('Introspection', () => {
                     {
                       name: 'includeDeprecated',
                       type: {
-                        kind: 'SCALAR',
-                        name: 'Boolean',
-                        ofType: null,
+                        kind: 'NON_NULL',
+                        name: null,
+                        ofType: {
+                          kind: 'SCALAR',
+                          name: 'Boolean',
+                          ofType: null,
+                        },
                       },
                       defaultValue: 'false',
                     },
@@ -856,6 +876,11 @@ describe('Introspection', () => {
                 },
                 {
                   name: 'VARIABLE_DEFINITION',
+                  isDeprecated: false,
+                  deprecationReason: null,
+                },
+                {
+                  name: 'FRAGMENT_VARIABLE_DEFINITION',
                   isDeprecated: false,
                   deprecationReason: null,
                 },
@@ -973,9 +998,13 @@ describe('Introspection', () => {
                   defaultValue: '"No longer supported"',
                   name: 'reason',
                   type: {
-                    kind: 'SCALAR',
-                    name: 'String',
-                    ofType: null,
+                    kind: 'NON_NULL',
+                    name: null,
+                    ofType: {
+                      kind: 'SCALAR',
+                      name: 'String',
+                      ofType: null,
+                    },
                   },
                 },
               ],
@@ -1644,7 +1673,7 @@ describe('Introspection', () => {
       errors: [
         {
           message:
-            'Field "__type" argument "name" of type "String!" is required, but it was not provided.',
+            'Argument "<meta>.__type(name:)" of type "String!" is required, but it was not provided.',
           locations: [{ line: 3, column: 9 }],
         },
       ],
@@ -1738,11 +1767,11 @@ describe('Introspection', () => {
       _3: any,
       info: GraphQLResolveInfo,
     ): never {
-      expect.fail(`Called on ${info.parentType.name}::${info.fieldName}`);
+      expect.fail(`Called on ${info.parentType}::${info.fieldName}`);
     }
 
     function typeResolver(_1: any, _2: any, info: GraphQLResolveInfo): never {
-      expect.fail(`Called on ${info.parentType.name}::${info.fieldName}`);
+      expect.fail(`Called on ${info.parentType}::${info.fieldName}`);
     }
     /* c8 ignore stop */
 

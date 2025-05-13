@@ -2,6 +2,7 @@ import { assert, expect } from 'chai';
 import { describe, it } from 'mocha';
 
 import { expectJSON } from '../../__testUtils__/expectJSON.js';
+import { expectPromise } from '../../__testUtils__/expectPromise.js';
 import { resolveOnNextTick } from '../../__testUtils__/resolveOnNextTick.js';
 
 import type { PromiseOrValue } from '../../jsutils/PromiseOrValue.js';
@@ -2116,7 +2117,7 @@ describe('Execute: stream directive', () => {
 
     const document = parse(`
     query {
-      friendList @stream(initialCount: 1, label:"stream-label") {
+      friendList @stream(label:"stream-label") {
         ...NameFragment @defer(label: "DeferName") @defer(label: "DeferName")
         id
       }
@@ -2146,12 +2147,9 @@ describe('Execute: stream directive', () => {
     const result1 = executeResult.initialResult;
     expectJSON(result1).toDeepEqual({
       data: {
-        friendList: [{ id: '1' }],
+        friendList: [],
       },
-      pending: [
-        { id: '0', path: ['friendList', 0], label: 'DeferName' },
-        { id: '1', path: ['friendList'], label: 'stream-label' },
-      ],
+      pending: [{ id: '0', path: ['friendList'], label: 'stream-label' }],
       hasNext: true,
     });
 
@@ -2160,13 +2158,18 @@ describe('Execute: stream directive', () => {
     const result2 = await result2Promise;
     expectJSON(result2).toDeepEqual({
       value: {
+        pending: [{ id: '1', path: ['friendList', 0], label: 'DeferName' }],
         incremental: [
           {
-            data: { name: 'Luke' },
+            items: [{ id: '1' }],
             id: '0',
           },
+          {
+            data: { name: 'Luke' },
+            id: '1',
+          },
         ],
-        completed: [{ id: '0' }],
+        completed: [{ id: '1' }],
         hasNext: true,
       },
       done: false,
@@ -2181,7 +2184,7 @@ describe('Execute: stream directive', () => {
         incremental: [
           {
             items: [{ id: '2' }],
-            id: '1',
+            id: '0',
           },
         ],
         hasNext: true,
@@ -2191,7 +2194,7 @@ describe('Execute: stream directive', () => {
     const result4 = await iterator.next();
     expectJSON(result4).toDeepEqual({
       value: {
-        completed: [{ id: '1' }],
+        completed: [{ id: '0' }],
         hasNext: true,
       },
       done: false,
@@ -2331,16 +2334,12 @@ describe('Execute: stream directive', () => {
   });
   it('Returns underlying async iterables when returned generator is returned', async () => {
     let returned = false;
-    let index = 0;
     const iterable = {
       [Symbol.asyncIterator]: () => ({
-        next: () => {
-          const friend = friends[index++];
-          if (friend == null) {
-            return Promise.resolve({ done: true, value: undefined });
-          }
-          return Promise.resolve({ done: false, value: friend });
-        },
+        next: () =>
+          new Promise(() => {
+            /* never resolves */
+          }),
         return: () => {
           returned = true;
         },
@@ -2349,11 +2348,8 @@ describe('Execute: stream directive', () => {
 
     const document = parse(`
       query {
-        friendList @stream(initialCount: 1) {
+        friendList @stream(initialCount: 0) {
           id
-          ... @defer {
-            name
-          }
         }
       }
     `);
@@ -2371,21 +2367,16 @@ describe('Execute: stream directive', () => {
     const result1 = executeResult.initialResult;
     expectJSON(result1).toDeepEqual({
       data: {
-        friendList: [
-          {
-            id: '1',
-          },
-        ],
+        friendList: [],
       },
-      pending: [
-        { id: '0', path: ['friendList', 0] },
-        { id: '1', path: ['friendList'] },
-      ],
+      pending: [{ id: '0', path: ['friendList'] }],
       hasNext: true,
     });
+
+    const result2Promise = iterator.next();
     const returnPromise = iterator.return();
 
-    const result2 = await iterator.next();
+    const result2 = await result2Promise;
     expectJSON(result2).toDeepEqual({
       done: true,
       value: undefined,
@@ -2510,13 +2501,7 @@ describe('Execute: stream directive', () => {
       done: true,
       value: undefined,
     });
-    try {
-      await throwPromise; /* c8 ignore start */
-      // Not reachable, always throws
-      /* c8 ignore stop */
-    } catch (e) {
-      // ignore error
-    }
+    await expectPromise(throwPromise).toRejectWith('bad');
     assert(returned);
   });
 });
